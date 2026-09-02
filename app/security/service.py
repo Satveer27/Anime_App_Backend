@@ -4,7 +4,7 @@ from app.security.exceptions import InvalidTokenError, TokenDoesNotExist, Reusin
 from app.security.models import RefreshToken
 from app.security.schemas import RefreshResponse
 import structlog
-from app.security.utils.redis_util import revoke_access_to_all_tokens, is_token_revoked, revoke_single_access_token
+from app.security.utils.redis_util import revoke_access_to_all_tokens, revoke_single_access_token
 from app.security.utils.password import check_password
 from app.users.repository import UserRepository
 from datetime import datetime, timezone
@@ -118,7 +118,7 @@ class JWTService:
                 jti_access = verfied_access_token.get("jti")
                 exp_access = verfied_access_token.get("exp")
                 if jti_access is not None and exp_access is not None:
-                    await revoke_single_access_token(jti_access, exp_access)
+                    await revoke_single_access_token(jti_access, exp_access, UUID(sub))
             except InvalidTokenError:
                 pass
                 

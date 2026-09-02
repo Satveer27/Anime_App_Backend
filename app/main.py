@@ -1,5 +1,6 @@
 from fastapi import Depends, FastAPI
 from sqlalchemy import text
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database.database import get_db, engine
 from contextlib import asynccontextmanager
@@ -21,35 +22,28 @@ from app.exceptions import(
 from app.router import main_router
 from fastapi.exceptions import RequestValidationError
 from app.core.redis.redis_client import redis_server
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from app.core.schedulers.refresh_token_scheduler import clean_refresh_tokens
-from zoneinfo import ZoneInfo
+
+logger = structlog.get_logger()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app_name = app.title
-    print(f"Starting up {app_name}...")
+    logger.info("app_startup_beginning", app_name=app_name)
     try:
         async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-                print(f"{app_name} is ready to serve requests and connected to database. running in {settings.environment}")
+                logger.info("app_ready", app_name=app_name, environment=settings.environment)
 
         await redis_server.ping()
-        print("Redis connection successful.")
+        logger.info("redis_connection_successful")
         
     except Exception as e:
-        print(f"Database connection failed: {e}")
+        logger.error("app_startup_failed", error=str(e))
         raise
-
-    scheduler = AsyncIOScheduler()
-    trigger = CronTrigger(hour=0, minute=0, timezone=ZoneInfo("Europe/London"))
-    scheduler.add_job(clean_refresh_tokens, trigger)
-    scheduler.start()
     
     yield
-    print(f"Shutting down {app_name}...")
-    scheduler.shutdown()
+    logger.info("app_shutting_down", app_name=app_name)
     await redis_server.close()
 
 

@@ -61,6 +61,8 @@ jobs:
         env:
           DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
           REDIS_URL: redis://localhost:6379/0
+          REDIS_BROKER_URL: redis://redis:6379/1
+          REDIS_BACKEND_URL: redis://redis:6379/2
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_ALGORITHM: HS256
           ACCESS_TOKEN_EXPIRE_MINUTES: 30
@@ -73,6 +75,8 @@ jobs:
         env:
           DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
           REDIS_URL: redis://localhost:6379/0
+          REDIS_BROKER_URL: redis://redis:6379/1
+          REDIS_BACKEND_URL: redis://redis:6379/2
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_ALGORITHM: HS256
           ACCESS_TOKEN_EXPIRE_MINUTES: 30
@@ -85,6 +89,8 @@ jobs:
         env:
           DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
           REDIS_URL: redis://localhost:6379/0
+          REDIS_BROKER_URL: redis://redis:6379/1
+          REDIS_BACKEND_URL: redis://redis:6379/2
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_ALGORITHM: HS256
           ACCESS_TOKEN_EXPIRE_MINUTES: 30
@@ -104,6 +110,8 @@ jobs:
         env:
           DB_URL: postgresql+asyncpg://f1_user:f1_password@db:5432/f1_database
           REDIS_URL: redis://redis:6379/0
+          REDIS_BROKER_URL: redis://redis:6379/1
+          REDIS_BACKEND_URL: redis://redis:6379/2
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_ALGORITHM: HS256
           ACCESS_TOKEN_EXPIRE_MINUTES: 30

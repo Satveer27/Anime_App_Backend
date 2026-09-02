@@ -10,17 +10,74 @@ services:
       - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U f1_user -d f1_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
   
   redis:
     image: redis:7-alpine
     container_name: f1_redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  celery_worker:
+    build: .
+    container_name: f1_celery_worker
+    command: uv run celery -A app.core.workers.celery_worker worker --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_URL: ${DB_URL}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
+      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      FRONTEND_URL: ${FRONTEND_URL}
+      ENVIRONMENT: ${ENVIRONMENT}
+  
+  celery_beat:
+    build: .
+    container_name: f1_celery_beat
+    command: uv run celery -A app.core.workers.celery_worker beat --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_URL: ${DB_URL}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
+      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      FRONTEND_URL: ${FRONTEND_URL}
+      ENVIRONMENT: ${ENVIRONMENT}
+  
 
   app:
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     build: .
     container_name: f1_app
     ports:
@@ -28,10 +85,14 @@ services:
     environment:
       DB_URL: ${DB_URL}
       REDIS_URL: ${REDIS_URL}
+      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
+      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
       JWT_SECRET: ${JWT_SECRET}
       JWT_ALGORITHM: ${JWT_ALGORITHM}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      FRONTEND_URL: ${FRONTEND_URL}
       ENVIRONMENT: ${ENVIRONMENT}
 
 

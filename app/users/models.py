@@ -15,6 +15,9 @@ class User(Base):
     rank = Column(SQLEnum(UserRank), default=UserRank.ROOKIE)
     rank_elo = Column(Integer, default=0)
     is_admin = Column(Boolean, default=False)
+    email_verification_code = Column(String, nullable=True, unique=True, index=True)
+    is_verified = Column(Boolean, default=False)
+    email_verification_expiry = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
