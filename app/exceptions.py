@@ -44,14 +44,19 @@ async def handle_duplicate_resource_error(request: Request, exc: DuplicateResour
     )
 
 async def handle_unprocessable_entity_exception(request: Request, exc:RequestValidationError):
+    errors = exc.errors()
+    for error in errors:
+        error.pop("ctx", None)  
+
     return JSONResponse(
         status_code=UNPROCESSABLE_ENTITY,
         content={
             "status_code": UNPROCESSABLE_ENTITY,
             "error": "Invalid request data",
-            "details": exc.errors(),
-        }
+            "details": errors,
+        },
     )
+    
 
 async def handle_resource_does_not_exist_exception(request: Request, exc:ResourceDoesNotExistError):
     return JSONResponse(

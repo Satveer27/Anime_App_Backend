@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, ValidationInfo
 from app.users.enum import F1Teams, UserRank
 from uuid import UUID
 from datetime import datetime
@@ -29,3 +29,17 @@ class UserResponseSchema(BaseModel):
 
 class ResendVerificationSchema(BaseModel):
     email: EmailStr
+
+class ForgotPasswordSchema(BaseModel):
+    email: EmailStr
+
+class ResetPasswordSchema(BaseModel):
+    password: str = Field(..., min_length=8, max_length=60, description="The new password of the user")
+    confirm_password: str = Field(..., min_length=8, max_length=60, description="The confirmation of the new password")
+
+    @field_validator("confirm_password")
+    @classmethod
+    def passwords_match(cls, v: str, info: ValidationInfo) -> str:
+        if "password" in info.data and v != info.data["password"]:
+            raise ValueError("Passwords do not match")
+        return v

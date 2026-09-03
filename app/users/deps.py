@@ -1,11 +1,10 @@
+from app.security.repository import RefreshTokenRepository
 from app.users.repository import UserRepository
+from app.security.deps import create_refresh_token_repository
 from fastapi import Depends
-from app.core.database.database import get_db
 from app.users.service import UserService
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.deps import create_user_repository
 
-def create_user_repository(db: AsyncSession = Depends(get_db)) -> UserRepository:
-    return UserRepository(db)
-
-def create_user_service(user_repository: UserRepository = Depends(create_user_repository)) -> UserService:
-    return UserService(user_repository)
+def create_user_service(user_repository: UserRepository = Depends(create_user_repository), 
+                        token_repository: RefreshTokenRepository = Depends(create_refresh_token_repository)) -> UserService:
+    return UserService(user_repository, token_repository)

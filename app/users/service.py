@@ -10,13 +10,16 @@ from app.schemas import SuccessMessage
 from app.users.models import User
 from app.core.redis.redis_client import redis_server
 from app.security.utils.password import hash_password
-from app.users.tasks.tasks import send_email_verification_task
+from app.security.repository import RefreshTokenRepository
+from app.users.tasks.tasks import send_email_verification_task, send_email_password_reset_task
+from app.security.utils.redis_util import revoke_access_to_all_tokens
 
 logger = structlog.get_logger()
 
 class UserService:
-    def __init__(self, user_repository: UserRepository):
+    def __init__(self, user_repository: UserRepository, token_repository: RefreshTokenRepository):
         self.user_repository = user_repository
+        self.token_repository = token_repository
 
     async def create_user_service(self, request: UserCreateSchema) -> UserResponseSchema:
         exists = await self.user_repository.get_user_by_email(request.email)
@@ -86,7 +89,52 @@ class UserService:
         return SuccessMessage(success_message="If the email exists, a verification email has been sent. Please check your inbox.")
 
 
+    async def forgot_password_service(self, email:str) -> SuccessMessage:
+        user = await self.user_repository.get_user_by_email(email)
+        if user is None:
+            logger.warning("forgot_password_user_not_found", email=email)
+            return SuccessMessage(success_message="If the email exists, a password reset email has been sent. Please check your inbox.")
+
+        on_cooldown = await redis_server.get(f"forgot_password_cooldown:{user.id}")
+        if on_cooldown:
+            logger.warning("forgot_password_rate_limited", user_id=str(user.id))
+            raise TooManyRequestsError("Please wait before requesting another password reset email.")
+
+        await redis_server.setex(f"forgot_password_cooldown:{user.id}", 300, "1")
+
+        token = secrets.token_urlsafe(32)
+        await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
+        send_email_password_reset_task.delay(user.email, token)
+
+        logger.info("forgot_password_requested", user_id=str(user.id))
+        return SuccessMessage(success_message="If the email exists, a password reset email has been sent. Please check your inbox.")
+
+    async def reset_password_service_via_email(self, token:str, new_password:str) -> SuccessMessage:
+        result = await redis_server.get(f"password_reset:{token}")
+        if not result:
+            logger.warning("password_reset_token_not_found", token=token)
+            raise ResourceDoesNotExistError("Token does not exist or has expired.")
         
+        user_id = UUID(result)
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("password_reset_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        hashed_password = hash_password(new_password)
+        user.password = hashed_password
+        await self.user_repository.update_user(user)
+        await redis_server.delete(f"password_reset:{token}")
+
+        #Revoke all sessions
+        await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
+
+        # Revoke all access tokens redis
+        await revoke_access_to_all_tokens(user_id)
+
+
+        logger.info("password_reset_successful", user_id=str(user_id))
+        return SuccessMessage(success_message="Password reset successfully.")
         
 
     
