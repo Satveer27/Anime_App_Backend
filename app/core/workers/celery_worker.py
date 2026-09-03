@@ -21,7 +21,7 @@ celery_app.conf.update(
     beat_schedule={
         "cleanup_expired_refresh_tokens": {
             "task": "cleanup_expired_refresh_tokens",
-            "schedule": timedelta(seconds=10),  # Run every 10 seconds
+            "schedule": crontab(day_of_week="sun", hour=0, minute=0),  # Every Sunday at midnight
         },
     }
 )

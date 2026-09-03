@@ -27,6 +27,12 @@ class AuthTokenError(Exception):
 class ConflictLoggingIn(Exception):
     "Base class for any logged in authentication failure"
 
+class AuthenticationError(Exception):
+    """Raised when authentication fails due to invalid credentials or other reasons."""
+
+class TooManyRequestsError(Exception):
+    """Raised when a user exceeds the allowed number of requests in a given time frame."""
+
 # Handle exceptions
 async def handle_duplicate_resource_error(request: Request, exc: DuplicateResourceError):
     return JSONResponse(
@@ -66,12 +72,27 @@ async def handle_auth_token_error(request: Request, exc:AuthTokenError):
         }
     )
 
+async def handle_authentication_error(request: Request, exc: AuthenticationError):
+    logger.warning("authentication_error", error_type=type(exc).__name__, path=str(request.url), error=str(exc))
+    return JSONResponse(
+        status_code=UNAUTHORIZED,
+        content={
+            "status_code": UNAUTHORIZED,
+            "error": str(exc),
+        }
+    )
+
 async def handle_already_logged_in_error(request: Request, exc: ConflictLoggingIn):
     return JSONResponse(
         status_code=CONFLICT,
         content={"status_code": CONFLICT, "error": str(exc)},
     )
 
+async def handle_too_many_requests(request: Request, exc: TooManyRequestsError):
+    return JSONResponse(
+        status_code=429,
+        content={"status_code": 429, "error": str(exc)},
+    )
 
 async def handle_internal_exception(request: Request, exc: Exception):
     logger.error("unhandled_exception", path=str(request.url), error=str(exc))

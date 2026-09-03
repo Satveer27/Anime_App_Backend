@@ -36,18 +36,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      DB_URL: ${DB_URL}
-      REDIS_URL: ${REDIS_URL}
-      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
-      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_ALGORITHM: ${JWT_ALGORITHM}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
-      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
-      RESEND_API_KEY: ${RESEND_API_KEY}
-      FRONTEND_URL: ${FRONTEND_URL}
-      ENVIRONMENT: ${ENVIRONMENT}
+    env_file:
+      - .env.dev
   
   celery_beat:
     build: .
@@ -58,18 +48,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      DB_URL: ${DB_URL}
-      REDIS_URL: ${REDIS_URL}
-      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
-      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_ALGORITHM: ${JWT_ALGORITHM}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
-      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
-      RESEND_API_KEY: ${RESEND_API_KEY}
-      FRONTEND_URL: ${FRONTEND_URL}
-      ENVIRONMENT: ${ENVIRONMENT}
+    env_file:
+      - .env.dev
   
 
   app:
@@ -82,18 +62,8 @@ services:
     container_name: f1_app
     ports:
       - "8000:8000"
-    environment:
-      DB_URL: ${DB_URL}
-      REDIS_URL: ${REDIS_URL}
-      REDIS_BROKER_URL: ${REDIS_BROKER_URL}
-      REDIS_BACKEND_URL: ${REDIS_BACKEND_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_ALGORITHM: ${JWT_ALGORITHM}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
-      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
-      RESEND_API_KEY: ${RESEND_API_KEY}
-      FRONTEND_URL: ${FRONTEND_URL}
-      ENVIRONMENT: ${ENVIRONMENT}
+    env_file:
+      - .env.dev
 
 
 volumes:

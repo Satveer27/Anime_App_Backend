@@ -29,9 +29,10 @@ async def refresh_access_token( response: Response,
 @auth_router.post("/login", response_model=TokenResponse, status_code=200)
 async def login(request: UserRequestLogin, 
                 response: Response, 
+                refresh_token: str | None = Cookie(default=None),
                 service: JWTService = Depends(create_jwt_service)):
-    
-    result = await service.login_service(request.email, request.password)
+
+    result = await service.login_service(request.email, request.password, refresh_token)
     response.set_cookie(
         key="refresh_token",
         value=result.refresh_token,

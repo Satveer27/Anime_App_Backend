@@ -1,6 +1,7 @@
 from app.security.repository import RefreshTokenRepository
 from app.security.utils.jwt import decode_token, generate_refresh_token, generate_access_token
-from app.security.exceptions import InvalidTokenError, TokenDoesNotExist, ReusingToken, InvalidCredentials, AlreadyLoggedInError
+from app.security.exceptions import InvalidTokenError, TokenDoesNotExist, ReusingToken, AlreadyLoggedInError
+from app.exceptions import AuthenticationError
 from app.security.models import RefreshToken
 from app.security.schemas import RefreshResponse
 import structlog
@@ -70,11 +71,35 @@ class JWTService:
              access_token=final_access_token
         )
 
-    async def login_service(self, email: str, password: str) -> RefreshResponse:
+    async def login_service(self, email: str, password: str, refresh_token: str | None = None) -> RefreshResponse:
+        if refresh_token is not None:
+            try:
+                decoded_token = decode_token(refresh_token, "refresh")
+                jti = decoded_token.get("jti")
+                sub = decoded_token.get("sub")
+
+                if jti is None or sub is None:
+                    logger.warning("refresh_token_missing_fields")
+                    raise InvalidTokenError("Token missing fields")
+
+                current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
+
+                if current_token is not None and not current_token.revoke:
+                    logger.warning("already_logged_in", user_id=sub)
+                    raise AlreadyLoggedInError("User is already logged in. Please logout first.")
+            except InvalidTokenError:
+                pass
+
+
         user = await self.user_repository.get_user_by_email(email)
         if user is None or not check_password(password, user.password):
             logger.warning("login_failed", email=email)
-            raise InvalidCredentials("Incorrect password and username")
+            raise AuthenticationError("Incorrect password and username")
+
+        print(f"User {user.email} has been verified: {user.is_verified}")
+        if user.is_verified is False:
+            logger.warning("login_failed_unverified_email", email=email)
+            raise AuthenticationError("Email is not verified. Please verify your email before logging in.")
 
         new_refresh_token = generate_refresh_token(user.id)
 

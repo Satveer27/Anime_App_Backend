@@ -26,3 +26,6 @@ class UserResponseSchema(BaseModel):
     created_at: datetime  = Field(..., description="The creation date of the user")
 
     model_config = {"from_attributes": True}
+
+class ResendVerificationSchema(BaseModel):
+    email: EmailStr
