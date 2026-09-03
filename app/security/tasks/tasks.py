@@ -16,5 +16,6 @@ async def refresh_token_scheduler():
     async with asyncSessionMaker() as db:
         repository = create_refresh_token_repository(db)
         deleted_count = await repository.cleanup_expired_refresh_tokens()
+        await db.commit()
         logger.info("expired_refresh_tokens_cleaned", count=deleted_count)
     await engine.dispose()

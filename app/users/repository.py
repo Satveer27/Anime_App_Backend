@@ -10,7 +10,7 @@ class UserRepository:
 
     async def create_user(self, user:User) -> User:
         self.db.add(user)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(user)
         return user
 
@@ -30,16 +30,11 @@ class UserRepository:
         result = await self.db.execute(select(User).where(User.username == username))
         return result.scalar_one_or_none()
 
-    async def get_user_by_email_verification_code(self, code:str) -> User | None:
-        result = await self.db.execute(select(User).where(User.email_verification_code == code))
-        return result.scalar_one_or_none()
-
     async def update_user(self, user:User) -> User:
         self.db.add(user)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(user)
         return user
 
     async def delete_user(self, user:User) -> None:
         await self.db.delete(user)
-        await self.db.commit()
