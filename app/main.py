@@ -6,9 +6,11 @@ from app.core.database.database import get_db, engine
 from contextlib import asynccontextmanager
 from app.config import settings
 from app.exceptions import (
+    ForbiddenError,
     TooManyRequestsError,
     handle_authentication_error,
     handle_duplicate_resource_error,
+    handle_forbidden_error,
     handle_resource_does_not_exist_exception,
     handle_auth_token_error,
     handle_already_logged_in_error,
@@ -66,6 +68,7 @@ app.add_exception_handler(AuthTokenError, handle_auth_token_error)
 app.add_exception_handler(ConflictLoggingIn, handle_already_logged_in_error)
 app.add_exception_handler(AuthenticationError, handle_authentication_error)
 app.add_exception_handler(TooManyRequestsError, handle_too_many_requests)
+app.add_exception_handler(ForbiddenError, handle_forbidden_error)
 
 # health and root endpoint
 @app.get("/")

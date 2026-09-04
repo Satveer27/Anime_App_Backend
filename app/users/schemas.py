@@ -1,37 +1,51 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator, ValidationInfo
-from app.users.enum import F1Teams, UserRank
+from app.users.enum import F1Teams
 from uuid import UUID
 from datetime import datetime
 
-class UserCreateSchema(BaseModel):
-    email: EmailStr = Field(..., max_length=255, description="The email of the user")
-    password: str = Field(..., min_length=8, max_length=60, description="The password of the user")
-    username: str = Field(..., min_length=3, max_length=50, description="The username of the user")
-    f1_team: F1Teams = Field(..., description="The F1 team of the user")
-
+#Tools
+class NormalizedEmailMixin(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, v: str) -> str:
         return v.lower()
 
+class UserCreateSchema(NormalizedEmailMixin):
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
+    password: str = Field(..., min_length=8, max_length=60, description="The password of the user")
+    username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
+    f1_team: F1Teams = Field(..., description="The F1 team of the user")
+
+class UserUpdateSchema(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
 
 class UserResponseSchema(BaseModel):
     id: UUID = Field(..., description="The ID of the user")
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
     username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
-    f1_team: F1Teams = Field(..., description="The F1 team of the user")
-    rank: UserRank = Field(..., description="The rank of the user")
-    rank_elo: int = Field(..., description="The rank elo of the user")
     is_admin: bool = Field(..., description="Whether the user is an admin")
     created_at: datetime  = Field(..., description="The creation date of the user")
 
     model_config = {"from_attributes": True}
 
-class ResendVerificationSchema(BaseModel):
-    email: EmailStr
+class ResendVerificationSchema(NormalizedEmailMixin):
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
+    
+class ForgotPasswordSchema(NormalizedEmailMixin):
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
 
-class ForgotPasswordSchema(BaseModel):
-    email: EmailStr
+class AdminUpdateUserEmailSchema(NormalizedEmailMixin):
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
+
+class UpdateEmailSchema(NormalizedEmailMixin):
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
+
+class BulkDeleteUsersSchema(BaseModel):
+    user_ids: list[UUID] = Field(..., min_length=1, max_length=50)
+
+class BulkDeleteResult(BaseModel):
+    deleted: list[UUID]
+    not_found: list[UUID]
 
 class ResetPasswordSchema(BaseModel):
     password: str = Field(..., min_length=8, max_length=60, description="The new password of the user")
@@ -41,5 +55,17 @@ class ResetPasswordSchema(BaseModel):
     @classmethod
     def passwords_match(cls, v: str, info: ValidationInfo) -> str:
         if "password" in info.data and v != info.data["password"]:
+            raise ValueError("Passwords do not match")
+        return v
+
+class UpdatePasswordSchema(BaseModel):
+    old_password: str = Field(..., min_length=8, max_length=60, description="The old password of the user")
+    new_password: str = Field(..., min_length=8, max_length=60, description="The new password of the user")
+    confirm_new_password: str = Field(..., min_length=8, max_length=60, description="The confirmation of the new password")
+
+    @field_validator("confirm_new_password")
+    @classmethod
+    def passwords_match(cls, v: str, info: ValidationInfo) -> str:
+        if "new_password" in info.data and v != info.data["new_password"]:
             raise ValueError("Passwords do not match")
         return v

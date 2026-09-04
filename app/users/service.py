@@ -1,15 +1,15 @@
 import secrets
 from uuid import UUID
 import structlog
-from app.exceptions import ResourceDoesNotExistError, TooManyRequestsError
+from app.exceptions import AuthenticationError, ForbiddenError, ResourceDoesNotExistError, TooManyRequestsError
 from app.users.repository import UserRepository
-from app.users.schemas import UserCreateSchema
+from app.users.schemas import BulkDeleteResult, UserCreateSchema, UserUpdateSchema
 from app.users.exceptions import UserAlreadyExistsError
 from app.users.schemas import UserResponseSchema
 from app.schemas import SuccessMessage
 from app.users.models import User
 from app.core.redis.redis_client import redis_server
-from app.security.utils.password import hash_password
+from app.security.utils.password import check_password, hash_password
 from app.security.repository import RefreshTokenRepository
 from app.users.tasks.tasks import send_email_verification_task, send_email_password_reset_task
 from app.security.utils.redis_util import revoke_access_to_all_tokens
@@ -88,7 +88,6 @@ class UserService:
         logger.info("resend_email_verification_sent", user_id=str(user.id))
         return SuccessMessage(success_message="If the email exists, a verification email has been sent. Please check your inbox.")
 
-
     async def forgot_password_service(self, email:str) -> SuccessMessage:
         user = await self.user_repository.get_user_by_email(email)
         if user is None:
@@ -135,8 +134,161 @@ class UserService:
 
         logger.info("password_reset_successful", user_id=str(user_id))
         return SuccessMessage(success_message="Password reset successfully.")
-        
 
-    
+    async def update_email_service(self, user_id: UUID, new_email: str) -> SuccessMessage:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("update_email_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        if user.email == new_email:
+            logger.info("update_email_no_change", user_id=str(user_id))
+            return SuccessMessage(success_message="This is already your current email address.")
+
+        existing = await self.user_repository.get_user_by_email(new_email)
+        if existing:
+            raise UserAlreadyExistsError("User Already exist")
+
+        user.email = new_email
+        user.is_verified = False
+        _ = await self.user_repository.update_user(user)
+
+        await revoke_access_to_all_tokens(user.id)
+        await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
+
+        token = secrets.token_urlsafe(32)
+        await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
         
+        send_email_verification_task.delay(user.email, token)
+
+        logger.info("email_change_succesfull", user_id=str(user.id))
+        return SuccessMessage(success_message="Your email has been updated. Please check your inbox to verify your new email.")
+
+    async def update_user_fields_service(self, request: UserUpdateSchema, user_id: UUID) -> UserResponseSchema:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("update_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        if request.username is not None:
+            user.username = request.username
+
+        updated_user = await self.user_repository.update_user(user)
+
+        logger.info("user_updated_successfully", user_id=str(user_id))
+        return UserResponseSchema.model_validate(updated_user)
+
+    async def delete_current_user_service(self, user_id: UUID) -> SuccessMessage:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("delete_user_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        await revoke_access_to_all_tokens(user.id)
+        await self.user_repository.delete_user(user)
+
+        logger.info("user deleted succesfully", user_id=str(user_id))
+        return SuccessMessage(success_message="User deleted successfully.")
+
+    async def update_user_password_service(self, user_id: UUID, new_password: str, old_password: str) -> SuccessMessage:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("update_password_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        if not check_password(old_password, user.password):
+            logger.warning("update_password_incorrect_old_password", user_id=str(user_id))
+            raise AuthenticationError("The old password is incorrect.")
+
+        hashed_password = hash_password(new_password)
+        user.password = hashed_password
+        await self.user_repository.update_user(user)
+
+        #Revoke all sessions
+        await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
+
+        # Revoke all access tokens redis
+        await revoke_access_to_all_tokens(user_id)
+
+        logger.info("password_updated_successfully", user_id=str(user_id))
+        return SuccessMessage(success_message="Password updated successfully.")
+       
+    async def get_user_by_id_service(self, user_id: UUID) -> UserResponseSchema:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("get_user_by_id_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+        return UserResponseSchema.model_validate(user)
+
+
+
+    # Admin only services
+    async def get_all_users_service(self) -> list[UserResponseSchema]:
+        users = await self.user_repository.get_users()
+        return [UserResponseSchema.model_validate(user) for user in users]
+
+    async def update_user_email_by_id_service(self, user_id: UUID, new_email: str) -> UserResponseSchema:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("update_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        if user.email == new_email:
+            logger.info("update_email_no_change", user_id=str(user_id))
+            return UserResponseSchema.model_validate(user)
+
+
+        existing = await self.user_repository.get_user_by_email(new_email)
+        if existing:
+            raise UserAlreadyExistsError(f"User with email {new_email} already exists.")
+
+        user.email = new_email
+        user.is_verified = False
+
+        result  = await self.user_repository.update_user(user)
+
+        await revoke_access_to_all_tokens(user_id)
+        await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
+
         
+        token = secrets.token_urlsafe(32)
+        await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
+        
+        send_email_verification_task.delay(user.email, token)
+
+        logger.info("user_updated", user_id=str(result.id))
+        return UserResponseSchema.model_validate(result)
+
+    async def delete_user_by_id_service(self, user_id: UUID) -> SuccessMessage:
+        user = await self.user_repository.get_user_by_id(user_id)
+        if not user:
+            logger.warning("delete_user_not_found", user_id=str(user_id))
+            raise ResourceDoesNotExistError("User does not exist.")
+
+        await revoke_access_to_all_tokens(user_id)
+        await self.user_repository.delete_user(user)
+
+        logger.info("user_deleted", user_id=str(user_id))
+        return SuccessMessage(success_message="User deleted successfully.")
+
+    async def delete_multiple_users_by_ids_service(self, user_ids: list[UUID], admin_id: UUID) -> BulkDeleteResult:
+        if admin_id in user_ids:
+            raise ForbiddenError("You cannot delete your own account.")
+
+        not_found_ids = []
+        deleted_ids = []
+
+        for user_id in user_ids:
+            user = await self.user_repository.get_user_by_id(user_id)
+            if not user:
+                logger.warning("delete_user_not_found", user_id=str(user_id))
+                not_found_ids.append(str(user_id))
+
+            else:
+                await revoke_access_to_all_tokens(user_id)
+                await self.user_repository.delete_user(user)
+
+                deleted_ids.append(str(user_id))
+
+        logger.info("bulk_users_deleted", deleted_count=len(deleted_ids), not_found_count=len(not_found_ids), admin_id=str(admin_id))
+        return BulkDeleteResult(deleted=deleted_ids, not_found=not_found_ids)

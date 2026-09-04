@@ -12,6 +12,7 @@ CONFLICT = 409
 UNPROCESSABLE_ENTITY = 422
 RESOURCE_NOT_FOUND = 404
 UNAUTHORIZED = 401  
+FORBIDDEN = 403 
 
 
 # core exceptions
@@ -32,6 +33,9 @@ class AuthenticationError(Exception):
 
 class TooManyRequestsError(Exception):
     """Raised when a user exceeds the allowed number of requests in a given time frame."""
+
+class ForbiddenError(Exception):
+    """Raised when a user attempts to access a resource they are not authorized to access."""
 
 # Handle exceptions
 async def handle_duplicate_resource_error(request: Request, exc: DuplicateResourceError):
@@ -87,13 +91,25 @@ async def handle_authentication_error(request: Request, exc: AuthenticationError
         }
     )
 
+async def handle_forbidden_error(request: Request, exc: ForbiddenError):
+    logger.warning("forbidden_error", error_type=type(exc).__name__, path=str(request.url), error=str(exc))
+    return JSONResponse(
+        status_code=FORBIDDEN,
+        content={
+            "status_code": FORBIDDEN,
+            "error": str(exc),
+        }
+    )
+
 async def handle_already_logged_in_error(request: Request, exc: ConflictLoggingIn):
+    logger.warning("already_logged_in_error", error_type=type(exc).__name__, path=str(request.url), error=str(exc))
     return JSONResponse(
         status_code=CONFLICT,
         content={"status_code": CONFLICT, "error": str(exc)},
     )
 
 async def handle_too_many_requests(request: Request, exc: TooManyRequestsError):
+    logger.warning("too_many_requests_error", error_type=type(exc).__name__, path=str(request.url), error=str(exc))
     return JSONResponse(
         status_code=429,
         content={"status_code": 429, "error": str(exc)},

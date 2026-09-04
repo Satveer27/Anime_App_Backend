@@ -3,8 +3,10 @@ from app.security.schemas import UserRequestLogin, TokenResponse
 from app.schemas import SuccessMessage
 from app.security.deps import create_jwt_service
 from app.security.service import JWTService
-from app.security.exceptions import InvalidTokenError, InvalidTokenError
+from app.security.exceptions import InvalidTokenError
 from app.config import settings
+from app.core.deps import optional_security
+from fastapi.security import HTTPAuthorizationCredentials
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -46,14 +48,12 @@ async def login(request: UserRequestLogin,
 @auth_router.post("/logout", response_model=SuccessMessage, status_code=200)
 async def logout(response: Response, 
                  refresh_token: str | None = Cookie(default=None), 
-                 authorization: str | None = Header(default=None),
+                 credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
                  service: JWTService = Depends(create_jwt_service)):
     
     access_token = None
-    if authorization is not None:
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() == "bearer" and token:
-            access_token = token
+    if credentials:
+        access_token = credentials.credentials
 
     if refresh_token is None:
         raise InvalidTokenError("No token provided")
