@@ -26,7 +26,7 @@ class UserService:
         exists = await self.user_repository.get_user_by_email(request.email)
         if exists:
             logger.warning("signup_email_already_exists", email=request.email)
-            raise UserAlreadyExistsError(f"User with email {request.email} already exists.")
+            raise UserAlreadyExistsError()
 
         hashed_password = hash_password(request.password)
 
@@ -54,13 +54,13 @@ class UserService:
 
         if not result:
             logger.warning("email_verification_token_not_found", token=token)
-            raise ResourceDoesNotExistError("Token does not exist or has expired.")
+            raise ResourceDoesNotExistError()
         
         user_id = UUID(result)
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("email_verification_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
         
         user.is_verified = True
         await self.user_repository.update_user(user)
@@ -121,13 +121,13 @@ class UserService:
         result = await redis_server.get(f"password_reset:{token}")
         if not result:
             logger.warning("password_reset_token_not_found", token=token)
-            raise ResourceDoesNotExistError("Token does not exist or has expired.")
+            raise ResourceDoesNotExistError()
         
         user_id = UUID(result)
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("password_reset_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
 
         hashed_password = hash_password(new_password)
         user.password = hashed_password
@@ -149,7 +149,7 @@ class UserService:
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("update_email_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
 
         if user.email == new_email:
             logger.info("update_email_no_change", user_id=str(user_id))
@@ -158,7 +158,7 @@ class UserService:
         existing = await self.user_repository.get_user_by_email(new_email)
         if existing:
             logger.warning("email_already_taken", user_id=str(user_id), attempted_email=new_email)
-            raise UserAlreadyExistsError("User Already exist")
+            raise UserAlreadyExistsError()
 
         user.email = new_email
         user.is_verified = False
@@ -172,7 +172,7 @@ class UserService:
         
         send_email_verification_task.delay(user.email, token)
 
-        logger.info("email_change_succesful", user_id=str(user.id))
+        logger.info("email_change_successful", user_id=str(user.id))
         return SuccessMessage(success_message="Your email has been updated. Please check your inbox to verify your new email.")
 
     async def update_user_fields_service(self, request: UserUpdateSchema, user_id: UUID) -> UserResponseSchema:
@@ -181,7 +181,7 @@ class UserService:
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("update_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
 
         if request.username is not None:
             user.username = request.username
@@ -197,7 +197,7 @@ class UserService:
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("delete_user_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
 
         await revoke_access_to_all_tokens(user.id)
         await self.user_repository.delete_user(user)
@@ -211,7 +211,7 @@ class UserService:
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("update_password_user_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
 
         if not check_password(old_password, user.password):
             logger.warning("update_password_incorrect_old_password", user_id=str(user_id))
@@ -234,7 +234,7 @@ class UserService:
         user = await self.user_repository.get_user_by_id(user_id)
         if not user:
             logger.warning("get_user_by_id_not_found", user_id=str(user_id))
-            raise ResourceDoesNotExistError("User does not exist.")
+            raise ResourceDoesNotExistError()
         return UserResponseSchema.model_validate(user)
 
 
@@ -280,7 +280,7 @@ class UserService:
         existing = await self.user_repository.get_user_by_email(new_email)
         if existing:
             logger.warning("email_already_taken", admin_id=str(admin_id), user_id=str(user_id), attempted_email=new_email)
-            raise UserAlreadyExistsError(f"User with email {new_email} already exists.")
+            raise UserAlreadyExistsError()
 
         user.email = new_email
         user.is_verified = False

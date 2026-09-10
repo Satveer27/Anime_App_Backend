@@ -41,11 +41,11 @@ def decode_token(encoded: str, expected_type: str) -> dict:
         payload = jwt.decode(encoded, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
         logger.warning("token_decode_failed", expected_type=expected_type, error=str(exc))
-        raise InvalidTokenError("Token could not be decoded") from exc
+        raise InvalidTokenError() from exc
 
     if payload.get("type") != expected_type:
         logger.warning("token_type_mismatch", expected_type=expected_type, actual_type=payload.get("type"))
-        raise InvalidTokenError(f"Expected token type '{expected_type}'")
+        raise InvalidTokenError()
 
     return payload
 

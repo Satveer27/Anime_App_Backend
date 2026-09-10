@@ -79,22 +79,19 @@ async def get_all_users(page: int = Query(default=1, ge=1),
                         page_size: int = Query(default=20, ge=1, le=100), 
                         request: GetAllUserSchema = Depends(), 
                         service: UserService = Depends(create_user_service), 
-                        _: User = Depends(require_admin)):
-    return await service.get_all_users_service(page=page, page_size=page_size, getAllUserRequestSchema=request)
+                        admin: User = Depends(require_admin)):
+    return await service.get_all_users_service(page=page, page_size=page_size, getAllUserRequestSchema=request, admin_id=admin.id)
 
 @user_router.put("/admin/users/update/{user_id}", response_model=UserResponseSchema, status_code=200)
 async def update_user(user_id: str, 
                       payload: AdminUpdateUserEmailSchema, 
                       service: UserService = Depends(create_user_service), 
-                      _: User = Depends(require_admin)):
-    return await service.update_user_email_by_id_service(UUID(user_id), payload.email)
+                      admin: User = Depends(require_admin)):
+    return await service.update_user_email_by_id_service(UUID(user_id), payload.email, admin.id)
 
 @user_router.delete("/admin/users/delete/{user_id}", response_model=SuccessMessage, status_code=200)
 async def admin_delete_user(user_id: str, service: UserService = Depends(create_user_service), admin: User = Depends(require_admin)):
-    if user_id == str(admin.id):
-        raise ForbiddenError("You cannot delete your own account.")
-    
-    return await service.delete_user_by_id_service(UUID(user_id))
+    return await service.delete_user_by_id_service(UUID(user_id), admin_id=admin.id)
 
 @user_router.post("/admin/users/bulk-delete", response_model=BulkDeleteResult, status_code=200)
 async def bulk_delete_users(payload: BulkDeleteUsersSchema, 

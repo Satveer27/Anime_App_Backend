@@ -1,6 +1,6 @@
 from app.security.repository import RefreshTokenRepository
 from app.security.utils.jwt import decode_token, generate_refresh_token, generate_access_token
-from app.security.exceptions import InvalidTokenError, TokenDoesNotExist, ReusingToken, AlreadyLoggedInError
+from app.security.exceptions import InvalidTokenError, AlreadyLoggedInError
 from app.exceptions import AuthenticationError
 from app.security.models import RefreshToken
 from app.security.schemas import RefreshResponse
@@ -28,12 +28,12 @@ class JWTService:
 
         if jti is None or sub is None or exp is None:
             logger.warning("refresh_token_missing_fields")
-            raise InvalidTokenError("Token missing fields")
+            raise InvalidTokenError()
 
         result = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
         if result is None:
             logger.warning("refresh_token_not_found", jti=jti)
-            raise TokenDoesNotExist("The token does not exist, invalid token")
+            raise AuthenticationError("Session invalid, please login again.")
 
         if result.revoke:
             logger.warning("refresh_token_reuse_detected", user_id=sub, jti=jti)
@@ -41,7 +41,7 @@ class JWTService:
             await revoke_access_to_all_tokens(UUID(sub))
             logger.warning("all_sessions_revoked_due_to_reuse", user_id=sub)
 
-            raise ReusingToken("token reuse detected")
+            raise AuthenticationError("Session invalid, please login again.")
 
         result.revoke = True
         await self.refresh_token_repository.update_refresh_token(result)
@@ -76,7 +76,7 @@ class JWTService:
 
                 if jti is None or sub is None:
                     logger.warning("refresh_token_missing_fields")
-                    raise InvalidTokenError("Token missing fields")
+                    raise InvalidTokenError()
 
                 current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
@@ -122,13 +122,13 @@ class JWTService:
 
         if sub is None or jti is None:
             logger.warning("refresh_token_missing_fields")
-            raise InvalidTokenError("Token missing fields")
+            raise InvalidTokenError()
 
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
             logger.warning("logout_token_invalid", user_id=sub, jti=jti)
-            raise TokenDoesNotExist("Token is invalid or already logged out")
+            raise AuthenticationError("Session invalid, please login again.")
         
         current_token.revoke = True
         await self.refresh_token_repository.update_refresh_token(current_token)
@@ -154,19 +154,19 @@ class JWTService:
         
         if sub is None or jti is None:
             logger.warning("refresh_token_missing_fields")
-            raise InvalidTokenError("Token missing fields")
+            raise InvalidTokenError()
 
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
             logger.warning("logout_all_token_invalid", user_id=sub, jti=jti)
-            raise TokenDoesNotExist("Token is invalid")
+            raise AuthenticationError("Session invalid, please login again.")
 
         user = await self.user_repository.get_user_by_id(UUID(sub))
 
         if user is None:
             logger.warning("logout_all_user_invalid", user_id=sub, jti=jti)
-            raise AuthenticationError("User is invalid")
+            raise AuthenticationError("You are not logged in, please login first.")
 
         row_count = await self.refresh_token_repository.update_refresh_token_to_revoke(user_id=user.id)
 
