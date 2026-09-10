@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.security.models import RefreshToken
 from datetime import datetime, timezone
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from uuid import UUID
 
 class RefreshTokenRepository:
@@ -19,6 +19,11 @@ class RefreshTokenRepository:
         await self.db.flush()
         await self.db.refresh(refresh_token)
         return refresh_token
+
+    async def update_refresh_token_to_revoke(self, user_id: UUID) -> int:
+        result = await self.db.execute(update(RefreshToken).where(RefreshToken.user_id == user_id, RefreshToken.revoke == False).values(revoke=True))
+        return result.rowcount
+        
 
     async def delete_refresh_token(self, refresh_token: RefreshToken) -> None:
         await self.db.delete(refresh_token)

@@ -170,13 +170,15 @@ class JWTService:
             logger.warning("logout_all_token_invalid", user_id=sub, jti=jti)
             raise TokenDoesNotExist("Token is invalid")
 
-        refreshList = await self.refresh_token_repository.get_refresh_token_by_user_id(UUID(sub))
-        if len(refreshList) != 0:
-            for token in refreshList:
-                token.revoke = True
-                await self.refresh_token_repository.update_refresh_token(token)
+        user = await self.user_repository.get_user_by_id(UUID(sub))
+
+        if user is None:
+            logger.warning("logout_all_user_invalid", user_id=sub, jti=jti)
+            raise AuthenticationError("User is invalid")
+
+        row_count = await self.refresh_token_repository.update_refresh_token_to_revoke(user_id=user.id)
 
         await revoke_access_to_all_tokens(UUID(sub))
-        logger.info("all_sessions_logged_out", user_id=sub, session_count=len(refreshList))
+        logger.info("all_sessions_logged_out", user_id=sub, session_count=row_count)
         
          
