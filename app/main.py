@@ -5,26 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database.database import get_db, engine
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.exceptions import (
-    ForbiddenError,
-    TooManyRequestsError,
-    handle_authentication_error,
-    handle_duplicate_resource_error,
-    handle_forbidden_error,
-    handle_resource_does_not_exist_exception,
-    handle_auth_token_error,
-    handle_already_logged_in_error,
-    handle_too_many_requests,
-    handle_unprocessable_entity_exception,
-    handle_internal_exception,
-)
-from app.exceptions import(
-    DuplicateResourceError,
-    ResourceDoesNotExistError,
-    AuthTokenError,
-    ConflictLoggingIn,
-    AuthenticationError,
-)
+from app.exceptions import AppError, handle_app_error, handle_validation_error, handle_internal_exception
+from fastapi.exceptions import RequestValidationError
 from app.router import main_router
 from fastapi.exceptions import RequestValidationError
 from app.core.redis.redis_client import redis_server
@@ -60,15 +42,9 @@ app.include_router(main_router)
 
 
 #Exception
+app.add_exception_handler(AppError, handle_app_error)
+app.add_exception_handler(RequestValidationError, handle_validation_error)
 app.add_exception_handler(Exception, handle_internal_exception)
-app.add_exception_handler(DuplicateResourceError, handle_duplicate_resource_error)
-app.add_exception_handler(RequestValidationError, handle_unprocessable_entity_exception)
-app.add_exception_handler(ResourceDoesNotExistError, handle_resource_does_not_exist_exception)
-app.add_exception_handler(AuthTokenError, handle_auth_token_error)
-app.add_exception_handler(ConflictLoggingIn, handle_already_logged_in_error)
-app.add_exception_handler(AuthenticationError, handle_authentication_error)
-app.add_exception_handler(TooManyRequestsError, handle_too_many_requests)
-app.add_exception_handler(ForbiddenError, handle_forbidden_error)
 
 # health and root endpoint
 @app.get("/")

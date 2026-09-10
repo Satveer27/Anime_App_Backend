@@ -37,15 +37,9 @@ class JWTService:
 
         if result.revoke:
             logger.warning("refresh_token_reuse_detected", user_id=sub, jti=jti)
-            all_refresh_token = await self.refresh_token_repository.get_refresh_token_by_user_id(UUID(sub))
-            if len(all_refresh_token) != 0:
-                for token in all_refresh_token:
-                    await self.refresh_token_repository.delete_refresh_token(token)
-
-
+            await self.refresh_token_repository.delete_all_refresh_tokens_for_user(UUID(sub))
             await revoke_access_to_all_tokens(UUID(sub))
             logger.warning("all_sessions_revoked_due_to_reuse", user_id=sub)
-
 
             raise ReusingToken("token reuse detected")
 
@@ -119,7 +113,6 @@ class JWTService:
         
         return RefreshResponse(refresh_token=new_refresh_token, access_token=new_access_token)
 
-
     async def logout_service(self, refresh_token: str, access_token: str | None = None) -> None:
         logger.info("logout_attempt")
         verified_token = decode_token(refresh_token, "refresh")
@@ -151,7 +144,6 @@ class JWTService:
                 pass
                 
         logger.info("user_logged_out", user_id=sub, jti=jti)
-
 
     async def logout_all_accounts(self, refresh_token: str) -> None:
         logger.info("logout_all_attempt")

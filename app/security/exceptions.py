@@ -1,16 +1,13 @@
-from app.exceptions import AuthTokenError, ConflictLoggingIn
+from app.exceptions import AuthenticationError, ConflictError
 
-class InvalidTokenError(AuthTokenError):
-    pass
+class InvalidTokenError(AuthenticationError):
+    default_message = "Token could not be verified."
 
-class TokenDoesNotExist(AuthTokenError):
-    pass
+class TokenDoesNotExist(AuthenticationError):
+    default_message = "Token does not exist or has already been used."
 
-class ReusingToken(AuthTokenError):
-    pass
+class ReusingToken(AuthenticationError):
+    default_message = "Token reuse detected; all sessions have been revoked."
 
-class InvalidCredentials(AuthTokenError):
-    pass
-
-class AlreadyLoggedInError(ConflictLoggingIn):
-    pass
+class AlreadyLoggedInError(ConflictError):
+    default_message = "You are already logged in. Please log out first."
