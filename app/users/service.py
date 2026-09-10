@@ -36,7 +36,6 @@ class UserService:
             email = request.email,
             username = request.username,
             password = hashed_password,
-            f1_team = request.f1_team,
         )
 
         result = await self.user_repository.create_user(user)

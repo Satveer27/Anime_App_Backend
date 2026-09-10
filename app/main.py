@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     await redis_server.close()
 
 
-app = FastAPI(title="F1 FastAPI Application", lifespan=lifespan)
+app = FastAPI(title="AnimePlanet FastAPI Application", lifespan=lifespan)
 
 # Routes
 app.include_router(main_router)
@@ -48,7 +48,7 @@ app.add_exception_handler(Exception, handle_internal_exception)
 # health and root endpoint
 @app.get("/")
 async def read_root():
-    return {"message": "Welcome to f1 FastAPI application!"}
+    return {"message": "Welcome to AnimePlanet FastAPI application!"}
 
 @app.get("/health")
 async def check_health(db: AsyncSession = Depends(get_db)):

@@ -1,5 +1,4 @@
 from uuid import UUID
-from app.exceptions import ForbiddenError
 from app.users.models import User
 from app.core.deps import require_admin, get_current_user
 from app.schemas import SuccessMessage

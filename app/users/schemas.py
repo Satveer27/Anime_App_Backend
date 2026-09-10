@@ -1,5 +1,4 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator, ValidationInfo
-from app.users.enum import F1Teams
 from uuid import UUID
 from datetime import datetime
 
@@ -15,7 +14,6 @@ class UserCreateSchema(NormalizedEmailMixin):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
     password: str = Field(..., min_length=8, max_length=60, description="The password of the user")
     username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
-    f1_team: F1Teams = Field(..., description="The F1 team of the user")
 
 class UserUpdateSchema(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")

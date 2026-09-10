@@ -1,7 +1,7 @@
 [project]
-name = "f1planet"
+name = "AnimePlanet"
 version = "0.1.0"
-description = "F1 trivia, live race viewing, and competitive quiz platform"
+description = "Anime app that provides recommendations, animes, analysis based off MAL profile"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.19.1",
