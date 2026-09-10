@@ -3,7 +3,7 @@ from uuid import UUID
 import structlog
 from app.exceptions import AuthenticationError, ForbiddenError, ResourceDoesNotExistError, TooManyRequestsError
 from app.users.repository import UserRepository
-from app.users.schemas import BulkDeleteResult, UserCreateSchema, UserUpdateSchema
+from app.users.schemas import BulkDeleteResult, UserCreateSchema, UserUpdateSchema, GetAllUserSchema, PaginatedUsersResponse
 from app.users.exceptions import UserAlreadyExistsError
 from app.users.schemas import UserResponseSchema
 from app.schemas import SuccessMessage
@@ -223,9 +223,27 @@ class UserService:
 
 
     # Admin only services
-    async def get_all_users_service(self) -> list[UserResponseSchema]:
-        users = await self.user_repository.get_users()
-        return [UserResponseSchema.model_validate(user) for user in users]
+    async def get_all_users_service(self, getAllUserRequestSchema: GetAllUserSchema, page: int, page_size: int) -> PaginatedUsersResponse:
+        total = await self.user_repository.count_users(username= getAllUserRequestSchema.username,
+                                                        email=getAllUserRequestSchema.email,
+                                                        is_admin=getAllUserRequestSchema.is_admin,
+                                                        created_after=getAllUserRequestSchema.created_after,
+                                                        created_before=getAllUserRequestSchema.created_before)
+
+        offset = (page - 1) * page_size
+        users = await self.user_repository.get_users(limit=page_size, 
+                                                     offset=offset, 
+                                                     username= getAllUserRequestSchema.username,
+                                                     email=getAllUserRequestSchema.email,
+                                                     is_admin=getAllUserRequestSchema.is_admin,
+                                                     created_after=getAllUserRequestSchema.created_after,
+                                                     created_before=getAllUserRequestSchema.created_before,
+                                                     username_sorted_bool=getAllUserRequestSchema.username_sorted_bool)
+        
+        return PaginatedUsersResponse(items=[UserResponseSchema.model_validate(user) for user in users],
+                                      total=total,
+                                      page_size=page_size, 
+                                      page=offset)
 
     async def update_user_email_by_id_service(self, user_id: UUID, new_email: str) -> UserResponseSchema:
         user = await self.user_repository.get_user_by_id(user_id)

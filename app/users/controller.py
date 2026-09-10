@@ -3,9 +3,9 @@ from app.exceptions import ForbiddenError
 from app.users.models import User
 from app.core.deps import require_admin, get_current_user
 from app.schemas import SuccessMessage
-from app.users.schemas import BulkDeleteResult, BulkDeleteUsersSchema, ForgotPasswordSchema, ResendVerificationSchema, ResetPasswordSchema, UserResponseSchema, UserCreateSchema, AdminUpdateUserEmailSchema, UpdatePasswordSchema, UpdateEmailSchema, UserUpdateSchema
+from app.users.schemas import *
 from app.users.deps import create_user_service
-from fastapi import Depends
+from fastapi import Depends, Query
 from app.users.service import UserService
 from fastapi import APIRouter
 
@@ -68,9 +68,13 @@ async def delete_user(user: User = Depends(get_current_user), service: UserServi
 async def get_user_by_id(user_id: str, service: UserService = Depends(create_user_service), _: User = Depends(require_admin)):
     return await service.get_user_by_id_service(UUID(user_id))
 
-@user_router.get("/admin/users", response_model=list[UserResponseSchema], status_code=200)
-async def get_all_users(service: UserService = Depends(create_user_service), _: User = Depends(require_admin)):
-    return await service.get_all_users_service()
+@user_router.get("/admin/users", response_model=PaginatedUsersResponse, status_code=200)
+async def get_all_users(page: int = Query(default=1, ge=1), 
+                        page_size: int = Query(default=20, ge=1, le=100), 
+                        request: GetAllUserSchema = Depends(), 
+                        service: UserService = Depends(create_user_service), 
+                        _: User = Depends(require_admin)):
+    return await service.get_all_users_service(page=page, page_size=page_size, getAllUserRequestSchema=request)
 
 @user_router.put("/admin/update", response_model=UserResponseSchema, status_code=200)
 async def update_user(user_id: str, 
