@@ -1,14 +1,23 @@
 [project]
-name = "f1planet"
+name = "AnimePlanet"
 version = "0.1.0"
-description = "F1 trivia, live race viewing, and competitive quiz platform"
+description = "Anime app that provides recommendations, animes, analysis based off MAL profile"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.19.1",
+    "apscheduler>=3.11.3",
     "asyncpg>=0.31.0",
+    "bcrypt>=5.0.0",
+    "celery>=5.6.3",
     "fastapi>=0.141.1",
+    "psycopg2-binary>=2.9.12",
     "pydantic-settings>=2.15.0",
+    "pydantic[email]>=2.13.4",
+    "pyjwt>=2.13.0",
+    "redis>=8.1.0",
+    "resend>=2.36.0",
     "sqlalchemy[asyncio]>=2.0.52",
+    "structlog>=26.1.0",
     "uvicorn>=0.52.1",
 ]
 
