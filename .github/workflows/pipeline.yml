@@ -17,10 +17,22 @@ on:
     
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
+
   startup-and-test:
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
+    env:
+      DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+      REDIS_URL: redis://localhost:6379/0
+      REDIS_BROKER_URL: redis://localhost:6379/1
+      REDIS_BACKEND_URL: redis://localhost:6379/2
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      FRONTEND_URL: http://localhost:3000
+      ENVIRONMENT: Testing
 
     services:
       postgres-db-test:
@@ -36,6 +48,16 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5 
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -58,65 +80,53 @@ jobs:
       # Alembic migration
       - name: run alembic migrations
         run: uv run alembic upgrade head
-        env:
-          DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
-          REDIS_URL: redis://localhost:6379/0
-          REDIS_BROKER_URL: redis://redis:6379/1
-          REDIS_BACKEND_URL: redis://redis:6379/2
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_ALGORITHM: HS256
-          ACCESS_TOKEN_EXPIRE_MINUTES: 30
-          REFRESH_TOKEN_EXPIRE_DAYS: 7
 
-      
       # Alembic migration checks
       - name: check for missing migrations
         run: uv run alembic check
-        env:
-          DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
-          REDIS_URL: redis://localhost:6379/0
-          REDIS_BROKER_URL: redis://redis:6379/1
-          REDIS_BACKEND_URL: redis://redis:6379/2
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_ALGORITHM: HS256
-          ACCESS_TOKEN_EXPIRE_MINUTES: 30
-          REFRESH_TOKEN_EXPIRE_DAYS: 7
 
-      
       # Run tests
       - name: Run tests
         run: uv run pytest --disable-warnings -q
-        env:
-          DB_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
-          REDIS_URL: redis://localhost:6379/0
-          REDIS_BROKER_URL: redis://redis:6379/1
-          REDIS_BACKEND_URL: redis://redis:6379/2
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_ALGORITHM: HS256
-          ACCESS_TOKEN_EXPIRE_MINUTES: 30
-          REFRESH_TOKEN_EXPIRE_DAYS: 7
-
       
   dockerfile-build:
     runs-on: ubuntu-latest
     needs: startup-and-test
+    env:
+      DB_URL: postgresql+asyncpg://f1_user:f1_password@db:5432/f1_database
+      REDIS_URL: redis://redis:6379/0
+      REDIS_BROKER_URL: redis://redis:6379/1
+      REDIS_BACKEND_URL: redis://redis:6379/2
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      FRONTEND_URL: http://localhost:3000
+      ENVIRONMENT: Testing
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate .env.dev for docker compose
+        run: |
+          cat <<EOF > .env.dev
+          DB_URL=${DB_URL}
+          REDIS_URL=${REDIS_URL}
+          REDIS_BROKER_URL=${REDIS_BROKER_URL}
+          REDIS_BACKEND_URL=${REDIS_BACKEND_URL}
+          JWT_SECRET=${JWT_SECRET}
+          JWT_ALGORITHM=${JWT_ALGORITHM}
+          ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
+          REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS}
+          RESEND_API_KEY=${RESEND_API_KEY}
+          FRONTEND_URL=${FRONTEND_URL}
+          ENVIRONMENT=${ENVIRONMENT}
+          EOF
+
       - name: Start app via docker-compose
         run: docker compose up -d --build
-        env:
-          DB_URL: postgresql+asyncpg://f1_user:f1_password@db:5432/f1_database
-          REDIS_URL: redis://redis:6379/0
-          REDIS_BROKER_URL: redis://redis:6379/1
-          REDIS_BACKEND_URL: redis://redis:6379/2
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_ALGORITHM: HS256
-          ACCESS_TOKEN_EXPIRE_MINUTES: 30
-          REFRESH_TOKEN_EXPIRE_DAYS: 7
-          ENVIRONMENT: Testing
 
       - name: Wait and check health endpoint
         run: |
@@ -131,6 +141,11 @@ jobs:
           echo "App failed to become healthy in time"
           exit 1
       
+      - name: show logs on failure
+        if: failure()
+        run: docker compose logs
+      
       - name: tear down
+        if: always()
         run: docker compose down
 

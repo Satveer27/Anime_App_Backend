@@ -15,16 +15,17 @@ async def refresh_access_token( response: Response,
                                 refresh_token: str | None = Cookie(default=None), 
                                 service: JWTService = Depends(create_jwt_service),):
     if refresh_token is None:
-        raise InvalidTokenError("No refresh token provided")
+        raise InvalidTokenError()
     else:
         result = await service.refresh_access_token_service(refresh_token)
         response.set_cookie(
                 key="refresh_token",
                 value=result.refresh_token,
                 httponly=True,
-                secure=False,       
+                secure=settings.http_secure,       
                 samesite="lax",
                 max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+                path="/auth"
             )
         return TokenResponse(access_token=result.access_token, token_type="bearer")
 
@@ -39,9 +40,10 @@ async def login(request: UserRequestLogin,
         key="refresh_token",
         value=result.refresh_token,
         httponly=True,
-        secure=False,       
+        secure=settings.http_secure,       
         samesite="lax",
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        path="/auth"
     )
     return TokenResponse(access_token=result.access_token, token_type="bearer")
 
@@ -56,11 +58,11 @@ async def logout(response: Response,
         access_token = credentials.credentials
 
     if refresh_token is None:
-        raise InvalidTokenError("No token provided")
+        raise InvalidTokenError()
 
     await service.logout_service(refresh_token, access_token)
 
-    response.delete_cookie("refresh_token")
+    response.delete_cookie("refresh_token", path="/auth")
 
     return SuccessMessage(success_message="Logged out successfully")
 
@@ -71,10 +73,10 @@ async def logout_all(response: Response,
                      service: JWTService = Depends(create_jwt_service)):
     
     if refresh_token is None:
-        raise InvalidTokenError("No token provided")
+        raise InvalidTokenError()
     
     await service.logout_all_accounts(refresh_token)
     
-    response.delete_cookie("refresh_token")
+    response.delete_cookie("refresh_token", path="/auth")
     
     return SuccessMessage(success_message="Logged out all accounts successfully")

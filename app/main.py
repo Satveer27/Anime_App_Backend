@@ -8,7 +8,6 @@ from app.config import settings
 from app.exceptions import AppError, handle_app_error, handle_validation_error, handle_internal_exception
 from fastapi.exceptions import RequestValidationError
 from app.router import main_router
-from fastapi.exceptions import RequestValidationError
 from app.core.redis.redis_client import redis_server
 
 logger = structlog.get_logger()
