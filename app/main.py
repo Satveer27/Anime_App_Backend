@@ -77,9 +77,9 @@ async def read_root():
 
 @app.get("/health")
 async def check_health(db: AsyncSession = Depends(get_db)):
-    # Perform any necessary health checks here
     result = await db.execute(text("SELECT 1"))
     if result.scalar() == 1:
         return {"status": "healthy"}
     else:
+        logger.error("health_check_failed", reason="db_query_returned_unexpected_result")
         return {"status": "unhealthy"}

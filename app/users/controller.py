@@ -3,7 +3,13 @@ from app.exceptions import ForbiddenError
 from app.users.models import User
 from app.core.deps import require_admin, get_current_user
 from app.schemas import SuccessMessage
-from app.users.schemas import *
+from app.users.schemas import (
+    UserCreateSchema, UserResponseSchema, ResendVerificationSchema,
+    ForgotPasswordSchema, ResetPasswordSchema, UpdatePasswordSchema,
+    UpdateEmailSchema, UserUpdateSchema, GetAllUserSchema,
+    PaginatedUsersResponse, AdminUpdateUserEmailSchema,
+    BulkDeleteUsersSchema, BulkDeleteResult,
+)
 from app.users.deps import create_user_service
 from fastapi import Depends, Query
 from app.users.service import UserService
@@ -51,7 +57,7 @@ async def update_user_email(payload: UpdateEmailSchema,
     
     return await service.update_email_service(user.id, payload.email)
 
-@user_router.put("/update-user", response_model=UserResponseSchema, status_code=200)
+@user_router.patch("/update-user", response_model=UserResponseSchema, status_code=200)
 async def update_user_user(payload: UserUpdateSchema, 
                             user: User = Depends(get_current_user), 
                             service: UserService = Depends(create_user_service)):
@@ -64,7 +70,7 @@ async def delete_user(user: User = Depends(get_current_user), service: UserServi
     return await service.delete_current_user_service(user.id)
 
 # Admin requests
-@user_router.get("/admin/user", response_model=UserResponseSchema, status_code=200)
+@user_router.get("/admin/users/{user_id}", response_model=UserResponseSchema, status_code=200)
 async def get_user_by_id(user_id: str, service: UserService = Depends(create_user_service), _: User = Depends(require_admin)):
     return await service.get_user_by_id_service(UUID(user_id))
 
@@ -76,21 +82,21 @@ async def get_all_users(page: int = Query(default=1, ge=1),
                         _: User = Depends(require_admin)):
     return await service.get_all_users_service(page=page, page_size=page_size, getAllUserRequestSchema=request)
 
-@user_router.put("/admin/update", response_model=UserResponseSchema, status_code=200)
+@user_router.put("/admin/users/update/{user_id}", response_model=UserResponseSchema, status_code=200)
 async def update_user(user_id: str, 
                       payload: AdminUpdateUserEmailSchema, 
                       service: UserService = Depends(create_user_service), 
                       _: User = Depends(require_admin)):
     return await service.update_user_email_by_id_service(UUID(user_id), payload.email)
 
-@user_router.delete("/admin/delete", response_model=SuccessMessage, status_code=200)
+@user_router.delete("/admin/users/delete/{user_id}", response_model=SuccessMessage, status_code=200)
 async def admin_delete_user(user_id: str, service: UserService = Depends(create_user_service), admin: User = Depends(require_admin)):
     if user_id == str(admin.id):
         raise ForbiddenError("You cannot delete your own account.")
     
     return await service.delete_user_by_id_service(UUID(user_id))
 
-@user_router.post("/admin/bulk-delete", response_model=BulkDeleteResult, status_code=200)
+@user_router.post("/admin/users/bulk-delete", response_model=BulkDeleteResult, status_code=200)
 async def bulk_delete_users(payload: BulkDeleteUsersSchema, 
                             service: UserService = Depends(create_user_service), 
                             admin: User = Depends(require_admin)):

@@ -1,10 +1,13 @@
 import jwt
 from app.config import settings
+import structlog
 from uuid import UUID
 import uuid
 from datetime import datetime, timedelta, timezone
 from app.security.exceptions import InvalidTokenError
 from app.security.utils.redis_util import track_access_token
+
+logger = structlog.get_logger()
 
 async def generate_access_token(user_id: UUID) -> str:
     now = datetime.now(timezone.utc)
@@ -37,9 +40,11 @@ def decode_token(encoded: str, expected_type: str) -> dict:
     try:
         payload = jwt.decode(encoded, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
+        logger.warning("token_decode_failed", expected_type=expected_type, error=str(exc))
         raise InvalidTokenError("Token could not be decoded") from exc
 
     if payload.get("type") != expected_type:
+        logger.warning("token_type_mismatch", expected_type=expected_type, actual_type=payload.get("type"))
         raise InvalidTokenError(f"Expected token type '{expected_type}'")
 
     return payload

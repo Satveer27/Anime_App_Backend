@@ -9,7 +9,11 @@ logger = structlog.get_logger()
 
 @celery_app.task(name="cleanup_expired_refresh_tokens")
 def cleanup_expired_refresh_tokens():
-    asyncio.run(refresh_token_scheduler())
+    try:
+        asyncio.run(refresh_token_scheduler())
+    except Exception as e:
+        logger.error("refresh_token_cleanup_failed", error=str(e))
+        raise
 
 
 async def refresh_token_scheduler():

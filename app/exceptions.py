@@ -39,6 +39,7 @@ class ForbiddenError(Exception):
 
 # Handle exceptions
 async def handle_duplicate_resource_error(request: Request, exc: DuplicateResourceError):
+    logger.warning("duplicate_resource_error", error_type=type(exc).__name__, path=str(request.url), error=str(exc))
     return JSONResponse(
         status_code= CONFLICT,
         content={
@@ -48,6 +49,7 @@ async def handle_duplicate_resource_error(request: Request, exc: DuplicateResour
     )
 
 async def handle_unprocessable_entity_exception(request: Request, exc:RequestValidationError):
+    logger.warning("validation_error", path=str(request.url), errors=exc.errors())
     errors = exc.errors()
     for error in errors:
         error.pop("ctx", None)  
@@ -63,6 +65,7 @@ async def handle_unprocessable_entity_exception(request: Request, exc:RequestVal
     
 
 async def handle_resource_does_not_exist_exception(request: Request, exc:ResourceDoesNotExistError):
+    logger.warning("resource_not_found", path=str(request.url), error=str(exc))
     return JSONResponse(
         status_code=RESOURCE_NOT_FOUND,
         content={

@@ -19,6 +19,7 @@ class JWTService:
             self.user_repository = user_repository
 
     async def refresh_access_token_service(self, refresh_token: str) ->RefreshResponse:
+        logger.info("refresh_attempt")
         payload = decode_token(refresh_token, "refresh")
 
         jti = payload.get("jti")
@@ -72,6 +73,7 @@ class JWTService:
         )
 
     async def login_service(self, email: str, password: str, refresh_token: str | None = None) -> RefreshResponse:
+        logger.info("login_attempt", email=email)
         if refresh_token is not None:
             try:
                 decoded_token = decode_token(refresh_token, "refresh")
@@ -96,7 +98,6 @@ class JWTService:
             logger.warning("login_failed", email=email)
             raise AuthenticationError("Incorrect password and username")
 
-        print(f"User {user.email} has been verified: {user.is_verified}")
         if user.is_verified is False:
             logger.warning("login_failed_unverified_email", email=email)
             raise AuthenticationError("Email is not verified. Please verify your email before logging in.")
@@ -120,6 +121,7 @@ class JWTService:
 
 
     async def logout_service(self, refresh_token: str, access_token: str | None = None) -> None:
+        logger.info("logout_attempt")
         verified_token = decode_token(refresh_token, "refresh")
 
         sub = verified_token.get("sub")
@@ -132,6 +134,7 @@ class JWTService:
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
+            logger.warning("logout_token_invalid", user_id=sub, jti=jti)
             raise TokenDoesNotExist("Token is invalid or already logged out")
         
         current_token.revoke = True
@@ -151,6 +154,7 @@ class JWTService:
 
 
     async def logout_all_accounts(self, refresh_token: str) -> None:
+        logger.info("logout_all_attempt")
         verified_token = decode_token(refresh_token, "refresh")
 
         sub = verified_token.get("sub")
@@ -163,6 +167,7 @@ class JWTService:
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
+            logger.warning("logout_all_token_invalid", user_id=sub, jti=jti)
             raise TokenDoesNotExist("Token is invalid")
 
         refreshList = await self.refresh_token_repository.get_refresh_token_by_user_id(UUID(sub))
@@ -172,5 +177,6 @@ class JWTService:
                 await self.refresh_token_repository.update_refresh_token(token)
 
         await revoke_access_to_all_tokens(UUID(sub))
+        logger.info("all_sessions_logged_out", user_id=sub, session_count=len(refreshList))
         
          

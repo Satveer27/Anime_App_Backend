@@ -10,7 +10,7 @@ class NormalizedEmailMixin(BaseModel):
     def normalize_email(cls, v: str) -> str:
         return v.lower()
 
-# Schemas
+# Request Schemas
 class UserCreateSchema(NormalizedEmailMixin):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
     password: str = Field(..., min_length=8, max_length=60, description="The password of the user")
@@ -19,15 +19,6 @@ class UserCreateSchema(NormalizedEmailMixin):
 
 class UserUpdateSchema(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
-
-class UserResponseSchema(BaseModel):
-    id: UUID = Field(..., description="The ID of the user")
-    email: EmailStr = Field(..., max_length=255, description="The email of the user")
-    username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
-    is_admin: bool = Field(..., description="Whether the user is an admin")
-    created_at: datetime  = Field(..., description="The creation date of the user")
-
-    model_config = {"from_attributes": True}
 
 class ResendVerificationSchema(NormalizedEmailMixin):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
@@ -43,10 +34,6 @@ class UpdateEmailSchema(NormalizedEmailMixin):
 
 class BulkDeleteUsersSchema(BaseModel):
     user_ids: list[UUID] = Field(..., min_length=1, max_length=50)
-
-class BulkDeleteResult(BaseModel):
-    deleted: list[UUID]
-    not_found: list[UUID]
 
 class ResetPasswordSchema(BaseModel):
     password: str = Field(..., min_length=8, max_length=60, description="The new password of the user")
@@ -78,9 +65,25 @@ class GetAllUserSchema(BaseModel):
     created_after: datetime | None = Field(default= None, description="Filter for users created after the date")
     created_before: datetime | None = Field(default= None, description="Filter for users created before the date")
     username_sorted_bool: bool = Field(default= False, description="Whether you would want to sort the users by username")
-    
+
+# Response Schemas
+class UserResponseSchema(BaseModel):
+    id: UUID = Field(..., description="The ID of the user")
+    email: EmailStr = Field(..., max_length=255, description="The email of the user")
+    username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
+    is_verified: bool = Field(..., description="Whether the user's email is verified")
+    is_admin: bool = Field(..., description="Whether the user is an admin")
+    created_at: datetime = Field(..., description="The creation date of the user")
+
+    model_config = {"from_attributes": True}
+
 class PaginatedUsersResponse(BaseModel):
     items: list[UserResponseSchema]
     total: int
     page_size: int
     page: int
+
+class BulkDeleteResult(BaseModel):
+    deleted: list[UUID]
+    not_found: list[UUID]
+    skipped_admins: list[UUID]
