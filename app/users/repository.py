@@ -85,10 +85,6 @@ class UserRepository:
         result = await self.db.execute(query)
         return result.scalar_one()
 
-    async def get_user_by_username(self, username:str) -> User | None:
-        result = await self.db.execute(select(User).where(User.username == username))
-        return result.scalar_one_or_none()
-
     async def update_user(self, user:User) -> User:
         self.db.add(user)
         await self.db.flush()

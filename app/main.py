@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AnimePlanet FastAPI Application", lifespan=lifespan)
 
 # Routes
-app.include_router(main_router)
+app.include_router(main_router, prefix="/api/v1")
 
 
 #Exception
