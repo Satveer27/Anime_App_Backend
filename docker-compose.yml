@@ -1,27 +1,71 @@
+name: anime-planet-app
+
 services:
   db:
     image: postgres:16-alpine
-    container_name: f1_db
+    container_name: anime_db
     environment:
-      POSTGRES_USER: f1_user
-      POSTGRES_PASSWORD: f1_password
-      POSTGRES_DB: f1_database
+      POSTGRES_USER: anime_user
+      POSTGRES_PASSWORD: anime_password
+      POSTGRES_DB: anime_database
     ports:
       - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anime_user -d anime_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
   
+  redis:
+    image: redis:7-alpine
+    container_name: anime_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  celery_worker:
+    build: .
+    container_name: anime_celery_worker
+    command: uv run celery -A app.core.workers.celery_worker worker --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.dev
+  
+  celery_beat:
+    build: .
+    container_name: anime_celery_beat
+    command: uv run celery -A app.core.workers.celery_worker beat --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.dev
+  
+
   app:
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     build: .
-    container_name: f1_app
+    container_name: anime_app
     ports:
       - "8000:8000"
-    environment:
-      DB_URL: postgresql+asyncpg://f1_user:f1_password@db:5432/f1_database
-      ENVIRONMENT: testing
-      LOG_SQL: TRUE
+    env_file:
+      - .env.dev
 
 
 volumes:
