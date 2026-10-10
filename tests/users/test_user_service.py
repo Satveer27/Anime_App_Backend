@@ -28,15 +28,19 @@ class TestCreateUserService:
         assert response.email == "new@example.com"
         assert response.username == "newuser"
 
-        redis_call = mock_redis.setex.call_args
-        assert redis_call.args[0].startswith("email_verification:")
-        assert redis_call.args[1] == 900
-        assert redis_call.args[2] == str(created_user.id)
+        assert mock_redis.setex.call_count == 2
+        token_call, mapping_call = mock_redis.setex.call_args_list
+        assert token_call.args[0].startswith("email_verification:")
+        assert token_call.args[1] == 900
+        assert token_call.args[2] == str(created_user.id)
+        assert mapping_call.args[0] == f"email_verification_user:{created_user.id}"
+        assert mapping_call.args[1] == 900
 
         celery_call = mock_celery_tasks["verification"].call_args
         assert celery_call.args[0] == created_user.email
-        # same random token flows into both the redis key and the task call
-        assert redis_call.args[0] == f"email_verification:{celery_call.args[1]}"
+        # same random token flows into the redis keys and the task call
+        assert token_call.args[0] == f"email_verification:{celery_call.args[1]}"
+        assert mapping_call.args[2] == celery_call.args[1]
 
     async def test_duplicate_email_raises(self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user):
         from app.users.schemas import UserCreateSchema
@@ -64,7 +68,9 @@ class TestVerifyUserEmailService:
         assert result.success_message == "Email verified successfully."
         assert user.is_verified is True
         mock_user_repository.update_user.assert_called_once_with(user)
-        mock_redis.delete.assert_called_once_with("email_verification:sometoken")
+        assert mock_redis.delete.call_count == 2
+        mock_redis.delete.assert_any_call("email_verification:sometoken")
+        mock_redis.delete.assert_any_call(f"email_verification_user:{user.id}")
 
     async def test_token_not_found(self, user_service, mock_user_repository, mock_redis):
         mock_redis.get.return_value = None
@@ -93,9 +99,19 @@ class TestResendEmailVerificationService:
         result = await user_service.resend_email_verification_service(user.email)
 
         assert "If the email exists" in result.success_message
-        assert mock_redis.setex.call_count == 2
+        assert mock_redis.setex.call_count == 3
+        mock_redis.delete.assert_not_called()
         mock_celery_tasks["verification"].assert_called_once()
         assert mock_celery_tasks["verification"].call_args.args[0] == user.email
+
+    async def test_invalidates_previous_token(self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user):
+        user = make_user(is_verified=False)
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.get.side_effect = [None, "old-token"]
+
+        await user_service.resend_email_verification_service(user.email)
+
+        mock_redis.delete.assert_called_once_with("email_verification:old-token")
 
     async def test_user_not_found_returns_generic_message(self, user_service, mock_user_repository, mock_redis, mock_celery_tasks):
         mock_user_repository.get_user_by_email.return_value = None
@@ -134,9 +150,19 @@ class TestForgotPasswordService:
         result = await user_service.forgot_password_service(user.email)
 
         assert "If the email exists" in result.success_message
-        assert mock_redis.setex.call_count == 2
+        assert mock_redis.setex.call_count == 3
+        mock_redis.delete.assert_not_called()
         mock_celery_tasks["password_reset"].assert_called_once()
         assert mock_celery_tasks["password_reset"].call_args.args[0] == user.email
+
+    async def test_invalidates_previous_token(self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user):
+        user = make_user()
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.get.side_effect = [None, "old-token"]
+
+        await user_service.forgot_password_service(user.email)
+
+        mock_redis.delete.assert_called_once_with("password_reset:old-token")
 
     async def test_user_not_found_returns_generic_message(self, user_service, mock_user_repository, mock_redis, mock_celery_tasks):
         mock_user_repository.get_user_by_email.return_value = None
@@ -170,7 +196,9 @@ class TestResetPasswordServiceViaEmail:
         assert result.success_message == "Password reset successfully."
         assert user.password != old_password_hash
         assert check_password("BrandNewPass123!", user.password)
-        mock_redis.delete.assert_called_once_with("password_reset:sometoken")
+        assert mock_redis.delete.call_count == 2
+        mock_redis.delete.assert_any_call("password_reset:sometoken")
+        mock_redis.delete.assert_any_call(f"password_reset_user:{user.id}")
 
         # sessions revoked: refresh tokens deleted + access tokens revoked in redis
         mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
@@ -200,6 +228,7 @@ class TestUpdateEmailService:
         mock_user_repository.get_user_by_email.return_value = None
         mock_user_repository.update_user.return_value = user
         mock_redis.zrangebyscore.return_value = []
+        mock_redis.get.return_value = None
 
         result = await user_service.update_email_service(user.id, "new@example.com")
 
@@ -208,6 +237,19 @@ class TestUpdateEmailService:
         assert user.is_verified is False
         mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
         mock_celery_tasks["verification"].assert_called_once()
+        mock_redis.delete.assert_not_called()
+
+    async def test_invalidates_previous_verification_token(self, user_service, mock_user_repository, mock_token_repository, mock_redis, mock_celery_tasks, make_user):
+        user = make_user(email="old@example.com", is_verified=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.update_user.return_value = user
+        mock_redis.zrangebyscore.return_value = []
+        mock_redis.get.return_value = "old-token"
+
+        await user_service.update_email_service(user.id, "new@example.com")
+
+        mock_redis.delete.assert_any_call("email_verification:old-token")
 
     async def test_same_email_is_noop(self, user_service, mock_user_repository, mock_token_repository, mock_celery_tasks, make_user):
         user = make_user(email="same@example.com")
@@ -284,6 +326,15 @@ class TestDeleteCurrentUserService:
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.delete_current_user_service(uuid4())
+
+        mock_user_repository.delete_user.assert_not_called()
+
+    async def test_admin_self_delete_blocked(self, user_service, mock_user_repository, make_user):
+        user = make_user(is_admin=True)
+        mock_user_repository.get_user_by_id.return_value = user
+
+        with pytest.raises(ForbiddenError):
+            await user_service.delete_current_user_service(user.id)
 
         mock_user_repository.delete_user.assert_not_called()
 
@@ -365,6 +416,7 @@ class TestUpdateUserEmailByIdService:
         mock_user_repository.get_user_by_email.return_value = None
         mock_user_repository.update_user.return_value = user
         mock_redis.zrangebyscore.return_value = []
+        mock_redis.get.return_value = None
 
         response = await user_service.update_user_email_by_id_service(user.id, "new@example.com", admin_id)
 
@@ -372,6 +424,19 @@ class TestUpdateUserEmailByIdService:
         assert user.is_verified is False
         mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
         mock_celery_tasks["verification"].assert_called_once()
+        mock_redis.delete.assert_not_called()
+
+    async def test_invalidates_previous_verification_token(self, user_service, mock_user_repository, mock_token_repository, mock_redis, mock_celery_tasks, make_user):
+        user = make_user(email="old@example.com", is_verified=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.update_user.return_value = user
+        mock_redis.zrangebyscore.return_value = []
+        mock_redis.get.return_value = "old-token"
+
+        await user_service.update_user_email_by_id_service(user.id, "new@example.com", uuid4())
+
+        mock_redis.delete.assert_any_call("email_verification:old-token")
 
     async def test_email_already_taken_raises(self, user_service, mock_user_repository, make_user):
         user = make_user(email="old@example.com")

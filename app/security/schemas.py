@@ -6,7 +6,7 @@ class RefreshResponse(BaseModel):
 
 class UserRequestLogin(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
-    password: str = Field(..., max_length=72, description="The password of the user")
+    password: str = Field(..., max_length=60, description="The password of the user")
 
 class TokenResponse(BaseModel):
     access_token : str = Field(..., description="The access token")

@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database.database import get_db, engine
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.exceptions import AppError, handle_app_error, handle_validation_error, handle_internal_exception
+from app.exceptions import AppError, handle_app_error, handle_validation_error, handle_internal_exception, handle_http_exception
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.router import main_router
 from app.core.redis.redis_client import redis_server
 
@@ -43,6 +44,7 @@ app.include_router(main_router, prefix="/api/v1")
 #Exception
 app.add_exception_handler(AppError, handle_app_error)
 app.add_exception_handler(RequestValidationError, handle_validation_error)
+app.add_exception_handler(StarletteHTTPException, handle_http_exception)
 app.add_exception_handler(Exception, handle_internal_exception)
 
 # health and root endpoint

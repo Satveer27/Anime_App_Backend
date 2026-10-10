@@ -41,6 +41,7 @@ class UserService:
         result = await self.user_repository.create_user(user)
 
         await redis_server.setex(f"email_verification:{token}", 900, str(result.id))
+        await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
         logger.info("user_signed_up", user_id=str(result.id))
 
         send_email_verification_task.delay(result.email, token)
@@ -60,10 +61,11 @@ class UserService:
         if not user:
             logger.warning("email_verification_user_not_found", user_id=str(user_id))
             raise ResourceDoesNotExistError()
-        
+
         user.is_verified = True
         await self.user_repository.update_user(user)
         await redis_server.delete(f"email_verification:{token}")
+        await redis_server.delete(f"email_verification_user:{user_id}")
 
         logger.info("email_verified", user_id=str(user_id))
         return SuccessMessage(success_message="Email verified successfully.")
@@ -85,10 +87,15 @@ class UserService:
             logger.warning("resend_verification_rate_limited", user_id=str(user.id))
             raise TooManyRequestsError("Please wait before requesting another verification email.")
 
+        previous_token = await redis_server.get(f"email_verification_user:{user.id}")
+        if previous_token:
+            await redis_server.delete(f"email_verification:{previous_token}")
+
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
+        await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
         await redis_server.setex(cooldown_key, 300, "1")  # Set cooldown for 5 minutes
-        
+
         send_email_verification_task.delay(user.email, token)
 
         logger.info("resend_email_verification_sent", user_id=str(user.id))
@@ -108,8 +115,13 @@ class UserService:
 
         await redis_server.setex(f"forgot_password_cooldown:{user.id}", 300, "1")
 
+        previous_token = await redis_server.get(f"password_reset_user:{user.id}")
+        if previous_token:
+            await redis_server.delete(f"password_reset:{previous_token}")
+
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
+        await redis_server.setex(f"password_reset_user:{user.id}", 900, token)
         send_email_password_reset_task.delay(user.email, token)
 
         logger.info("forgot_password_requested", user_id=str(user.id))
@@ -132,6 +144,7 @@ class UserService:
         user.password = hashed_password
         await self.user_repository.update_user(user)
         await redis_server.delete(f"password_reset:{token}")
+        await redis_server.delete(f"password_reset_user:{user_id}")
 
         #Revoke all sessions
         await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
@@ -166,9 +179,14 @@ class UserService:
         await revoke_access_to_all_tokens(user.id)
         await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
 
+        previous_token = await redis_server.get(f"email_verification_user:{user.id}")
+        if previous_token:
+            await redis_server.delete(f"email_verification:{previous_token}")
+
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
-        
+        await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
+
         send_email_verification_task.delay(user.email, token)
 
         logger.info("email_change_successful", user_id=str(user.id))
@@ -197,6 +215,10 @@ class UserService:
         if not user:
             logger.warning("delete_user_user_not_found", user_id=str(user_id))
             raise ResourceDoesNotExistError()
+
+        if user.is_admin:
+            logger.warning("admin_self_delete_blocked", user_id=str(user_id))
+            raise ForbiddenError("Admins cannot delete their own account.")
 
         await revoke_access_to_all_tokens(user.id)
         await self.user_repository.delete_user(user)
@@ -289,10 +311,14 @@ class UserService:
         await revoke_access_to_all_tokens(user_id)
         await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
 
-        
+        previous_token = await redis_server.get(f"email_verification_user:{user.id}")
+        if previous_token:
+            await redis_server.delete(f"email_verification:{previous_token}")
+
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
-        
+        await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
+
         send_email_verification_task.delay(user.email, token)
 
         logger.info("admin_updated_user_email", admin_id=str(admin_id), user_id=str(result.id))
