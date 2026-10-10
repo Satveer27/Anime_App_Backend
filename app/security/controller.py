@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
-@auth_router.post("/refresh", response_model=TokenResponse, status_code=200)
+@auth_router.post("/refresh", response_model=TokenResponse, status_code=200, summary="Rotate refresh token and get a new access token")
 async def refresh_access_token( response: Response,
                                 refresh_token: str | None = Cookie(default=None), 
                                 service: JWTService = Depends(create_jwt_service),):
@@ -29,7 +29,7 @@ async def refresh_access_token( response: Response,
             )
         return TokenResponse(access_token=result.access_token, token_type="bearer")
 
-@auth_router.post("/login", response_model=TokenResponse, status_code=200)
+@auth_router.post("/login", response_model=TokenResponse, status_code=200, summary="Log in with email and password")
 async def login(request: UserRequestLogin, 
                 response: Response, 
                 refresh_token: str | None = Cookie(default=None),
@@ -47,7 +47,7 @@ async def login(request: UserRequestLogin,
     )
     return TokenResponse(access_token=result.access_token, token_type="bearer")
 
-@auth_router.post("/logout", response_model=SuccessMessage, status_code=200)
+@auth_router.post("/logout", response_model=SuccessMessage, status_code=200, summary="Log out the current session")
 async def logout(response: Response, 
                  refresh_token: str | None = Cookie(default=None), 
                  credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
@@ -67,7 +67,7 @@ async def logout(response: Response,
     return SuccessMessage(success_message="Logged out successfully")
 
 
-@auth_router.post("/logout-all", response_model=SuccessMessage, status_code=200)
+@auth_router.post("/logout-all", response_model=SuccessMessage, status_code=200, summary="Log out of every session")
 async def logout_all(response: Response,
                      refresh_token: str | None = Cookie(default=None), 
                      service: JWTService = Depends(create_jwt_service)):

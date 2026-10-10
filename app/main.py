@@ -35,7 +35,24 @@ async def lifespan(app: FastAPI):
     await redis_server.close()
 
 
-app = FastAPI(title="AnimePlanet FastAPI Application", lifespan=lifespan)
+app = FastAPI(
+    title="AnimePlanet FastAPI Application",
+    description="Authentication, user management, and admin API for the AnimePlanet backend.",
+    version="1.0.0",
+    lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "auth",
+            "description": "Login, refresh, and logout. Issues short-lived JWT access tokens "
+                            "and rotates an HttpOnly refresh-token cookie scoped to /api/v1/auth.",
+        },
+        {
+            "name": "users",
+            "description": "Signup, email verification, password/email management, and "
+                            "admin-only user administration (listing, editing, deleting).",
+        },
+    ],
+)
 
 # Routes
 app.include_router(main_router, prefix="/api/v1")
@@ -48,11 +65,11 @@ app.add_exception_handler(StarletteHTTPException, handle_http_exception)
 app.add_exception_handler(Exception, handle_internal_exception)
 
 # health and root endpoint
-@app.get("/")
+@app.get("/", tags=["health"], summary="Welcome message")
 async def read_root():
     return {"message": "Welcome to AnimePlanet FastAPI application!"}
 
-@app.get("/health")
+@app.get("/health", tags=["health"], summary="Database connectivity check")
 async def check_health(db: AsyncSession = Depends(get_db)):
     result = await db.execute(text("SELECT 1"))
     if result.scalar() == 1:
