@@ -61,6 +61,10 @@ class TestRefreshAccessTokenService:
         mock_redis.zrangebyscore.assert_called_once()
         assert mock_redis.zrangebyscore.call_args.args[0] == f"user_tokens:{user_id}"
 
+        # the session wipe must be committed, since raising AuthenticationError
+        # right after would otherwise let get_db's exception handler roll it back
+        mock_token_repository.commit.assert_called_once()
+
         mock_token_repository.update_refresh_token.assert_not_called()
         mock_token_repository.create_refresh_token.assert_not_called()
 

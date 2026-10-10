@@ -38,6 +38,7 @@ class JWTService:
         if result.revoke:
             logger.warning("refresh_token_reuse_detected", user_id=sub, jti=jti)
             await self.refresh_token_repository.delete_all_refresh_tokens_for_user(UUID(sub))
+            await self.refresh_token_repository.commit()
             await revoke_access_to_all_tokens(UUID(sub))
             logger.warning("all_sessions_revoked_due_to_reuse", user_id=sub)
 

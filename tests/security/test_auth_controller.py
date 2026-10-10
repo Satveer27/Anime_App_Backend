@@ -20,7 +20,7 @@ class TestLoginEndpoint:
         assert set_cookie is not None
         assert "refresh_token=newrefreshtoken" in set_cookie
         assert "HttpOnly" in set_cookie
-        assert "Path=/auth" in set_cookie
+        assert "Path=/api/v1/auth" in set_cookie
         assert "SameSite=lax" in set_cookie
 
         fake_jwt_service.login_service.assert_called_once_with("a@example.com", "Password123!", None)
@@ -59,7 +59,7 @@ class TestRefreshEndpoint:
         set_cookie = response.headers.get("set-cookie")
         assert "refresh_token=rotatedrefreshtoken" in set_cookie
         assert "HttpOnly" in set_cookie
-        assert "Path=/auth" in set_cookie
+        assert "Path=/api/v1/auth" in set_cookie
 
         fake_jwt_service.refresh_access_token_service.assert_called_once_with("oldrefreshtoken")
 
@@ -84,7 +84,7 @@ class TestLogoutEndpoint:
         assert set_cookie is not None
         assert 'refresh_token=""' in set_cookie
         assert "Max-Age=0" in set_cookie
-        assert "Path=/auth" in set_cookie
+        assert "Path=/api/v1/auth" in set_cookie
 
         fake_jwt_service.logout_service.assert_called_once_with("sometoken", "someaccesstoken")
 
@@ -118,7 +118,7 @@ class TestLogoutAllEndpoint:
         assert set_cookie is not None
         assert 'refresh_token=""' in set_cookie
         assert "Max-Age=0" in set_cookie
-        assert "Path=/auth" in set_cookie
+        assert "Path=/api/v1/auth" in set_cookie
 
         fake_jwt_service.logout_all_accounts.assert_called_once_with("sometoken")
 

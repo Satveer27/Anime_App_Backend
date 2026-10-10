@@ -25,7 +25,7 @@ async def refresh_access_token( response: Response,
                 secure=settings.http_secure,       
                 samesite="lax",
                 max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
-                path="/auth"
+                path="/api/v1/auth"
             )
         return TokenResponse(access_token=result.access_token, token_type="bearer")
 
@@ -43,7 +43,7 @@ async def login(request: UserRequestLogin,
         secure=settings.http_secure,       
         samesite="lax",
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
-        path="/auth"
+        path="/api/v1/auth"
     )
     return TokenResponse(access_token=result.access_token, token_type="bearer")
 
@@ -62,7 +62,7 @@ async def logout(response: Response,
 
     await service.logout_service(refresh_token, access_token)
 
-    response.delete_cookie("refresh_token", path="/auth")
+    response.delete_cookie("refresh_token", path="/api/v1/auth")
 
     return SuccessMessage(success_message="Logged out successfully")
 
@@ -76,7 +76,7 @@ async def logout_all(response: Response,
         raise InvalidTokenError()
     
     await service.logout_all_accounts(refresh_token)
-    
-    response.delete_cookie("refresh_token", path="/auth")
+
+    response.delete_cookie("refresh_token", path="/api/v1/auth")
     
     return SuccessMessage(success_message="Logged out all accounts successfully")

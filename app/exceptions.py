@@ -1,5 +1,6 @@
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi import Request, status
 import structlog
 
@@ -76,14 +77,35 @@ async def handle_app_error(request: Request, exc: AppError):
         content={"status_code": exc.status_code, "error": exc.message},
     )
 
+def _json_safe(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
 async def handle_validation_error(request: Request, exc: RequestValidationError):
     errors = exc.errors()
     for error in errors:
         error.pop("ctx", None)
+        if "input" in error:
+            error["input"] = _json_safe(error["input"])
     logger.warning("validation_error", path=str(request.url), errors=errors)
     return JSONResponse(
         status_code=422,
         content={"status_code": 422, "error": "Invalid request data", "details": errors},
+    )
+
+async def handle_http_exception(request: Request, exc: StarletteHTTPException):
+    logger.warning(
+        "http_exception",
+        status_code=exc.status_code,
+        path=str(request.url),
+        error=str(exc.detail),
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status_code": exc.status_code, "error": str(exc.detail)},
     )
 
 async def handle_internal_exception(request: Request, exc: Exception):

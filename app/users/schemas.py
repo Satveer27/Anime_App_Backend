@@ -57,7 +57,7 @@ class UpdatePasswordSchema(BaseModel):
         return v
 
 class GetAllUserSchema(BaseModel):
-    email: EmailStr | None = Field(default= None, max_length=255, description="The email of the user")
+    email: str | None = Field(default= None, max_length=255, description="Email prefix to search for")
     username: str | None = Field(default= None, min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_-]+$", description="The username of the user")
     is_admin: bool | None = Field(default= None, description="Whether the user is an admin")
     created_after: datetime | None = Field(default= None, description="Filter for users created after the date")
