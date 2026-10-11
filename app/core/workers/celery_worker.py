@@ -1,5 +1,4 @@
 import asyncio
-from datetime import timedelta
 from celery import Celery
 from celery.schedules import crontab
 from app.core.database.database import engine
