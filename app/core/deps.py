@@ -1,6 +1,6 @@
 from uuid import UUID
 import structlog
-from fastapi import Depends, Request
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.exceptions import AuthenticationError, ForbiddenError
 from app.security.repository import RefreshTokenRepository

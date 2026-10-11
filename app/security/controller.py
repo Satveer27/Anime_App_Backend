@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Cookie, Response, Header
+from fastapi import APIRouter, Depends, Cookie, Response
 from app.security.schemas import UserRequestLogin, TokenResponse
 from app.schemas import SuccessMessage
 from app.security.deps import create_jwt_service
