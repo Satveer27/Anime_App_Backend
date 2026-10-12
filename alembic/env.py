@@ -1,14 +1,16 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-
-from app.core.database.database import Base
-from app.users.models import User  
-from app.security.models import RefreshToken
 from app.config import settings
+from app.core.database.database import Base
+
+# Imported only so each model registers its table on Base.metadata; autogenerate and
+# `alembic check` see an empty schema (and want to drop every table) without them.
+# Every new models.py must be imported here.
+from app.security.models import RefreshToken  # noqa: F401
+from app.users.models import User  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -25,7 +27,7 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.db_url.replace("asyncpg", "psycopg2")) 
+config.set_main_option("sqlalchemy.url", settings.db_url.replace("asyncpg", "psycopg2"))
 
 
 # other values from the config, defined by the needs of env.py,
@@ -72,9 +74,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

@@ -1,8 +1,8 @@
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from fastapi import Request, status
 import structlog
+from fastapi import Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = structlog.get_logger()
 
@@ -12,8 +12,8 @@ INTERNAL_SERVER_ERROR = 500
 CONFLICT = 409
 UNPROCESSABLE_ENTITY = 422
 RESOURCE_NOT_FOUND = 404
-UNAUTHORIZED = 401  
-FORBIDDEN = 403 
+UNAUTHORIZED = 401
+FORBIDDEN = 403
 
 
 # core exceptions
@@ -25,6 +25,7 @@ class AppError(Exception):
         self.message = message or self.default_message
         super().__init__(self.message)
 
+
 class BadRequestError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     default_message = "Bad request."
@@ -33,12 +34,14 @@ class BadRequestError(AppError):
 class AuthenticationError(AppError):
     """The caller isn't properly authenticated — missing, invalid, expired,
     or revoked credentials/tokens."""
+
     status_code = status.HTTP_401_UNAUTHORIZED
     default_message = "Authentication failed."
 
 
 class ForbiddenError(AppError):
     """The caller is authenticated but not allowed to do this."""
+
     status_code = status.HTTP_403_FORBIDDEN
     default_message = "You do not have permission to perform this action."
 
@@ -50,6 +53,7 @@ class ResourceDoesNotExistError(AppError):
 
 class ConflictError(AppError):
     """The request conflicts with the resource's current state."""
+
     status_code = status.HTTP_409_CONFLICT
     default_message = "Conflict with current state."
 
@@ -77,12 +81,14 @@ async def handle_app_error(request: Request, exc: AppError):
         content={"status_code": exc.status_code, "error": exc.message},
     )
 
+
 def _json_safe(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
 
 async def handle_validation_error(request: Request, exc: RequestValidationError):
     errors = exc.errors()
@@ -96,6 +102,7 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
         content={"status_code": 422, "error": "Invalid request data", "details": errors},
     )
 
+
 async def handle_http_exception(request: Request, exc: StarletteHTTPException):
     logger.warning(
         "http_exception",
@@ -108,12 +115,13 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException):
         content={"status_code": exc.status_code, "error": str(exc.detail)},
     )
 
+
 async def handle_internal_exception(request: Request, exc: Exception):
     logger.error("unhandled_exception", path=str(request.url), error=str(exc))
     return JSONResponse(
         status_code=500,
-        content={"status_code": 500, "error": "An unexpected error occurred. Please try again later."},
+        content={
+            "status_code": 500,
+            "error": "An unexpected error occurred. Please try again later.",
+        },
     )
-
-
-

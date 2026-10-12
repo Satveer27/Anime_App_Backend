@@ -1,12 +1,18 @@
 import asyncio
+
 from celery import Celery
 from celery.schedules import crontab
-from app.core.database.database import engine
 from celery.signals import worker_process_init
+
 from app.config import settings
+from app.core.database.database import engine
 
-
-celery_app = Celery("worker", broker=settings.redis_broker_url, backend=settings.redis_backend_url, include=["app.security.tasks.tasks", "app.users.tasks.tasks"])
+celery_app = Celery(
+    "worker",
+    broker=settings.redis_broker_url,
+    backend=settings.redis_backend_url,
+    include=["app.security.tasks.tasks", "app.users.tasks.tasks"],
+)
 
 celery_app.conf.update(
     task_serializer="json",
@@ -22,15 +28,12 @@ celery_app.conf.update(
             "task": "cleanup_expired_refresh_tokens",
             "schedule": crontab(day_of_week="sun", hour=0, minute=0),  # Every Sunday at midnight
         },
-    }
+    },
 )
+
 
 @worker_process_init.connect
 def init_worker(**kwargs):
-    asyncio.run(engine.dispose())  # Dispose of the engine to avoid connection issues in worker processes
-
-
-
-
-
-
+    asyncio.run(
+        engine.dispose()
+    )  # Dispose of the engine to avoid connection issues in worker processes

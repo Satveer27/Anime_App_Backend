@@ -11,7 +11,9 @@ ADMIN = f"{BASE}/admin/users"
 class TestSignupEndpoint:
     def test_success(self, client, fake_user_service, make_user):
         created_user = make_user(email="new@example.com", username="newuser")
-        fake_user_service.create_user_service.return_value = UserResponseSchema.model_validate(created_user)
+        fake_user_service.create_user_service.return_value = UserResponseSchema.model_validate(
+            created_user
+        )
 
         response = client.post(
             f"{BASE}/signup",
@@ -41,7 +43,9 @@ class TestSignupEndpoint:
 
 class TestResendVerificationEndpoint:
     def test_success(self, client, fake_user_service):
-        fake_user_service.resend_email_verification_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.resend_email_verification_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.post(f"{BASE}/resend-verification", json={"email": "a@example.com"})
 
@@ -58,7 +62,9 @@ class TestResendVerificationEndpoint:
 
 class TestForgotPasswordEndpoint:
     def test_success(self, client, fake_user_service):
-        fake_user_service.forgot_password_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.forgot_password_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.post(f"{BASE}/forgot-password", json={"email": "a@example.com"})
 
@@ -75,7 +81,9 @@ class TestForgotPasswordEndpoint:
 
 class TestResetPasswordEndpoint:
     def test_success(self, client, fake_user_service):
-        fake_user_service.reset_password_service_via_email.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.reset_password_service_via_email.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.post(
             f"{BASE}/reset-password",
@@ -85,7 +93,9 @@ class TestResetPasswordEndpoint:
 
         assert response.status_code == 200
         SuccessMessage.model_validate(response.json())
-        fake_user_service.reset_password_service_via_email.assert_called_once_with("sometoken", "NewPass123!")
+        fake_user_service.reset_password_service_via_email.assert_called_once_with(
+            "sometoken", "NewPass123!"
+        )
 
     def test_missing_token_query_param_returns_422_not_500(self, client, fake_user_service):
         response = client.post(
@@ -109,7 +119,9 @@ class TestResetPasswordEndpoint:
 
 class TestVerifyEmailEndpoint:
     def test_success(self, client, fake_user_service):
-        fake_user_service.verify_user_email_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.verify_user_email_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.get(f"{BASE}/verify-email", params={"token": "sometoken"})
 
@@ -128,7 +140,9 @@ class TestMeEndpoint:
     def test_success(self, client, fake_user_service, as_current_user, make_user):
         user = make_user()
         as_current_user(user)
-        fake_user_service.get_user_by_id_service.return_value = UserResponseSchema.model_validate(user)
+        fake_user_service.get_user_by_id_service.return_value = UserResponseSchema.model_validate(
+            user
+        )
 
         response = client.get(f"{BASE}/me")
 
@@ -149,23 +163,37 @@ class TestUpdatePasswordEndpoint:
     def test_success(self, client, fake_user_service, as_current_user, make_user):
         user = make_user()
         as_current_user(user)
-        fake_user_service.update_user_password_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.update_user_password_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.put(
             f"{BASE}/update-password",
-            json={"old_password": "OldPass123!", "new_password": "NewPass123!", "confirm_new_password": "NewPass123!"},
+            json={
+                "old_password": "OldPass123!",
+                "new_password": "NewPass123!",
+                "confirm_new_password": "NewPass123!",
+            },
         )
 
         assert response.status_code == 200
         SuccessMessage.model_validate(response.json())
-        fake_user_service.update_user_password_service.assert_called_once_with(user.id, "NewPass123!", "OldPass123!")
+        fake_user_service.update_user_password_service.assert_called_once_with(
+            user.id, "NewPass123!", "OldPass123!"
+        )
 
-    def test_malformed_body_returns_422_not_500(self, client, fake_user_service, as_current_user, make_user):
+    def test_malformed_body_returns_422_not_500(
+        self, client, fake_user_service, as_current_user, make_user
+    ):
         as_current_user(make_user())
 
         response = client.put(
             f"{BASE}/update-password",
-            json={"old_password": "OldPass123!", "new_password": "NewPass123!", "confirm_new_password": "Different123!"},
+            json={
+                "old_password": "OldPass123!",
+                "new_password": "NewPass123!",
+                "confirm_new_password": "Different123!",
+            },
         )
 
         assert response.status_code == 422
@@ -176,7 +204,11 @@ class TestUpdatePasswordEndpoint:
 
         response = client.put(
             f"{BASE}/update-password",
-            json={"old_password": "OldPass123!", "new_password": "NewPass123!", "confirm_new_password": "NewPass123!"},
+            json={
+                "old_password": "OldPass123!",
+                "new_password": "NewPass123!",
+                "confirm_new_password": "NewPass123!",
+            },
         )
 
         assert response.status_code == 401
@@ -195,7 +227,9 @@ class TestUpdateEmailEndpoint:
         SuccessMessage.model_validate(response.json())
         fake_user_service.update_email_service.assert_called_once_with(user.id, "new@example.com")
 
-    def test_malformed_body_returns_422_not_500(self, client, fake_user_service, as_current_user, make_user):
+    def test_malformed_body_returns_422_not_500(
+        self, client, fake_user_service, as_current_user, make_user
+    ):
         as_current_user(make_user())
 
         response = client.put(f"{BASE}/update-email", json={"email": "not-an-email"})
@@ -217,7 +251,9 @@ class TestUpdateUserEndpoint:
         user = make_user(username="oldname")
         as_current_user(user)
         updated = make_user(username="newname")
-        fake_user_service.update_user_fields_service.return_value = UserResponseSchema.model_validate(updated)
+        fake_user_service.update_user_fields_service.return_value = (
+            UserResponseSchema.model_validate(updated)
+        )
 
         response = client.patch(f"{BASE}/update-user", json={"username": "newname"})
 
@@ -225,7 +261,9 @@ class TestUpdateUserEndpoint:
         UserResponseSchema.model_validate(response.json())
         assert response.json()["username"] == "newname"
 
-    def test_malformed_body_returns_422_not_500(self, client, fake_user_service, as_current_user, make_user):
+    def test_malformed_body_returns_422_not_500(
+        self, client, fake_user_service, as_current_user, make_user
+    ):
         as_current_user(make_user())
 
         response = client.patch(f"{BASE}/update-user", json={"username": "n"})
@@ -246,7 +284,9 @@ class TestDeleteUserEndpoint:
     def test_success(self, client, fake_user_service, as_current_user, make_user):
         user = make_user()
         as_current_user(user)
-        fake_user_service.delete_current_user_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.delete_current_user_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.delete(f"{BASE}/delete-user")
 
@@ -268,7 +308,9 @@ class TestAdminGetUserByIdEndpoint:
         admin = make_user(is_admin=True)
         target = make_user()
         as_admin_user(admin)
-        fake_user_service.get_user_by_id_service.return_value = UserResponseSchema.model_validate(target)
+        fake_user_service.get_user_by_id_service.return_value = UserResponseSchema.model_validate(
+            target
+        )
 
         response = client.get(f"{ADMIN}/{target.id}")
 
@@ -276,7 +318,9 @@ class TestAdminGetUserByIdEndpoint:
         UserResponseSchema.model_validate(response.json())
         fake_user_service.get_user_by_id_service.assert_called_once_with(target.id)
 
-    def test_malformed_uuid_path_param_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_uuid_path_param_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.get(f"{ADMIN}/not-a-uuid")
@@ -309,7 +353,9 @@ class TestAdminGetAllUsersEndpoint:
         PaginatedUsersResponse.model_validate(response.json())
         assert response.json()["total"] == 1
 
-    def test_malformed_query_param_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_query_param_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.get(ADMIN, params={"page": 1, "page_size": 1000})  # le=100
@@ -332,15 +378,21 @@ class TestAdminUpdateUserEndpoint:
         target = make_user(email="old@example.com")
         as_admin_user(admin)
         updated = make_user(email="new@example.com")
-        fake_user_service.update_user_email_by_id_service.return_value = UserResponseSchema.model_validate(updated)
+        fake_user_service.update_user_email_by_id_service.return_value = (
+            UserResponseSchema.model_validate(updated)
+        )
 
         response = client.put(f"{ADMIN}/update/{target.id}", json={"email": "new@example.com"})
 
         assert response.status_code == 200
         UserResponseSchema.model_validate(response.json())
-        fake_user_service.update_user_email_by_id_service.assert_called_once_with(target.id, "new@example.com", admin.id)
+        fake_user_service.update_user_email_by_id_service.assert_called_once_with(
+            target.id, "new@example.com", admin.id
+        )
 
-    def test_malformed_uuid_path_param_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_uuid_path_param_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.put(f"{ADMIN}/update/not-a-uuid", json={"email": "new@example.com"})
@@ -348,7 +400,9 @@ class TestAdminUpdateUserEndpoint:
         assert response.status_code == 422
         fake_user_service.update_user_email_by_id_service.assert_not_called()
 
-    def test_malformed_body_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_body_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.put(f"{ADMIN}/update/{uuid4()}", json={"email": "not-an-email"})
@@ -370,15 +424,21 @@ class TestAdminDeleteUserEndpoint:
         admin = make_user(is_admin=True)
         target = make_user()
         as_admin_user(admin)
-        fake_user_service.delete_user_by_id_service.return_value = SuccessMessage(success_message="ok")
+        fake_user_service.delete_user_by_id_service.return_value = SuccessMessage(
+            success_message="ok"
+        )
 
         response = client.delete(f"{ADMIN}/delete/{target.id}")
 
         assert response.status_code == 200
         SuccessMessage.model_validate(response.json())
-        fake_user_service.delete_user_by_id_service.assert_called_once_with(target.id, admin_id=admin.id)
+        fake_user_service.delete_user_by_id_service.assert_called_once_with(
+            target.id, admin_id=admin.id
+        )
 
-    def test_malformed_uuid_path_param_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_uuid_path_param_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.delete(f"{ADMIN}/delete/not-a-uuid")
@@ -409,7 +469,9 @@ class TestAdminBulkDeleteEndpoint:
         BulkDeleteResult.model_validate(response.json())
         assert len(response.json()["deleted"]) == 2
 
-    def test_malformed_body_returns_422_not_500(self, client, fake_user_service, as_admin_user, make_user):
+    def test_malformed_body_returns_422_not_500(
+        self, client, fake_user_service, as_admin_user, make_user
+    ):
         as_admin_user(make_user(is_admin=True))
 
         response = client.post(f"{ADMIN}/bulk-delete", json={"user_ids": []})  # min_length=1

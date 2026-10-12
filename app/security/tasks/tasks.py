@@ -1,11 +1,13 @@
-import structlog
 import asyncio
+
+import structlog
+
+from app.core.database.database import asyncSessionMaker, engine
 from app.core.workers.celery_worker import celery_app
-from app.core.database.database import asyncSessionMaker
 from app.security.deps import create_refresh_token_repository
-from app.core.database.database import engine
 
 logger = structlog.get_logger()
+
 
 @celery_app.task(name="cleanup_expired_refresh_tokens")
 def cleanup_expired_refresh_tokens():

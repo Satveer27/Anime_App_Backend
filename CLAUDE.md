@@ -20,11 +20,14 @@ docker compose up --build                # full stack: app, celery worker, celer
 uv run pytest                            # all tests (no real DB/Redis needed)
 uv run pytest tests/users/test_user_service.py::test_name   # single test
 
+uv run ruff check --fix .                # lint (a Claude hook also runs this on every edited .py file)
+uv run ruff format .                     # format
+
 uv run --env-file .env.local alembic revision --autogenerate -m "msg"   # new migration
 uv run --env-file .env.local alembic check                              # CI fails if models and migrations drift
 ```
 
-CI (`.github/workflows/pipeline.yml`) runs migrations, `alembic check`, pytest, then builds the compose stack and polls `/health`.
+CI (`.github/workflows/pipeline.yml`) runs `ruff check` and `ruff format --check`, migrations, `alembic check`, pytest, then builds the compose stack and polls `/health`.
 
 ## Configuration
 
@@ -49,6 +52,9 @@ Tests are unit/controller tests with mocks: repositories use `create_autospec`, 
 ## Workflow rules
 
 - Before opening a pull request (or creating a GitHub issue), show the user the proposed title and description and wait for approval. Pushing and opening are only done when the user asks.
+- Before saying a task is done, run `uv run pytest` and `uv run ruff check .` and report the results honestly. Tests are mock-only, so for anything touching SQL also verify the query another way (compile it or run it against the dev database) and say so if you could not.
+- Also run `uv run --env-file .env.local alembic check` (needs `docker compose up -d db`; apply `alembic upgrade head` first). It is the only check that catches model/migration drift, which the mock tests cannot. If Docker is not running, say you could not run it; CI will.
+- Never let ruff (or any cleanup) remove the model imports in `alembic/env.py`. They look unused but register each table on `Base.metadata`; without them `alembic check` wrongly reports every table as removed. They carry `# noqa: F401`. After any ruff `--fix` or import cleanup, re-read `alembic/env.py`, and import every new `models.py` there.
 - Record every measured number (before and after) in docs/METRICS.md.
 
 ## Production standard

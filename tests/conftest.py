@@ -1,6 +1,5 @@
 import os
 
-
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("DB_URL", "postgresql+asyncpg://test:test@localhost/test_db")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
@@ -14,14 +13,13 @@ os.environ.setdefault("RESEND_API_KEY", "test-resend-key")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:3000")
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-
 from app.security.models import RefreshToken
 from app.security.repository import RefreshTokenRepository
 from app.security.service import JWTService
@@ -35,7 +33,9 @@ from app.users.service import UserService
 def mock_celery_tasks(mocker):
     return {
         "verification": mocker.patch("app.users.tasks.tasks.send_email_verification_task.delay"),
-        "password_reset": mocker.patch("app.users.tasks.tasks.send_email_password_reset_task.delay"),
+        "password_reset": mocker.patch(
+            "app.users.tasks.tasks.send_email_password_reset_task.delay"
+        ),
     }
 
 
@@ -87,7 +87,7 @@ def make_user():
             password=hash_password(password),
             is_admin=is_admin,
             is_verified=is_verified,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     return _make
@@ -107,7 +107,7 @@ def make_refresh_token():
             jti=jti or uuid.uuid4(),
             user_id=user_id,
             revoke=revoke,
-            expires_at=expires_at or datetime.now(timezone.utc),
+            expires_at=expires_at or datetime.now(UTC),
         )
 
     return _make
