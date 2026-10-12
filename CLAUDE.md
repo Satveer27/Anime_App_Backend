@@ -53,6 +53,8 @@ Tests are unit/controller tests with mocks: repositories use `create_autospec`, 
 
 - Before opening a pull request (or creating a GitHub issue), show the user the proposed title and description and wait for approval. Pushing and opening are only done when the user asks.
 - Before saying a task is done, run `uv run pytest` and `uv run ruff check .` and report the results honestly. Tests are mock-only, so for anything touching SQL also verify the query another way (compile it or run it against the dev database) and say so if you could not.
+- Also run `uv run --env-file .env.local alembic check` (needs `docker compose up -d db`; apply `alembic upgrade head` first). It is the only check that catches model/migration drift, which the mock tests cannot. If Docker is not running, say you could not run it; CI will.
+- Never let ruff (or any cleanup) remove the model imports in `alembic/env.py`. They look unused but register each table on `Base.metadata`; without them `alembic check` wrongly reports every table as removed. They carry `# noqa: F401`. After any ruff `--fix` or import cleanup, re-read `alembic/env.py`, and import every new `models.py` there.
 - Record every measured number (before and after) in docs/METRICS.md.
 
 ## Production standard
