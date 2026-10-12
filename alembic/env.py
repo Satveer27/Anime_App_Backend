@@ -6,6 +6,12 @@ from alembic import context
 from app.config import settings
 from app.core.database.database import Base
 
+# Imported only so each model registers its table on Base.metadata; autogenerate and
+# `alembic check` see an empty schema (and want to drop every table) without them.
+# Every new models.py must be imported here.
+from app.security.models import RefreshToken  # noqa: F401
+from app.users.models import User  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
