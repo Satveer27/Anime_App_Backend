@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-AnimePlanet backend: a FastAPI app meant to provide anime recommendations and analysis based on a MAL profile. Currently implemented: authentication and user management only. Stack: FastAPI, async SQLAlchemy + asyncpg (Postgres), Alembic, Redis, Celery (+ beat), Resend for email, structlog. Dependencies are managed with `uv`.
+AnimePlanet backend: a FastAPI app meant to provide anime recommendations and analysis based on a MAL profile. Currently implemented: authentication and user management only. Stack: FastAPI, async SQLAlchemy + asyncpg (Postgres), Alembic, Redis, Celery (request-triggered work only), Resend for email, structlog. Dependencies are managed with `uv`. The product vision, vocabulary and decisions live in `CONTEXT.md` and `docs/adr/`; read them before planning a feature.
 
 The owner is building this as a job-landing portfolio project and is learning. Unless asked otherwise, explain the approach and let them implement; do not write feature logic unprompted.
 
@@ -15,7 +15,7 @@ uv sync --group dev                      # install deps incl. test tools
 docker compose up -d db redis            # Postgres (host port 5433) + Redis
 uv run --env-file .env.local alembic upgrade head              # apply migrations (from host)
 uv run --env-file .env.local uvicorn app.main:app --reload     # run API from host (docs at /docs)
-docker compose up --build                # full stack: app, celery worker, celery beat
+docker compose up --build                # full stack: app, celery worker, celery beat (until the Airflow migration)
 
 uv run pytest                            # all tests (no real DB/Redis needed)
 uv run pytest tests/users/test_user_service.py::test_name   # single test
@@ -39,7 +39,7 @@ Each feature is a package under `app/` (`users`, `security`) with the same layer
 - **Dependency wiring**: services and repositories are built by FastAPI dependency factories (`create_user_service` in `app/users/deps.py`, `create_*_repository` in `app/core/deps.py`). Auth guards `get_current_user` and `require_admin` live in `app/core/deps.py`.
 - **Errors**: raise `AppError` subclasses (`app/exceptions.py`, per-feature `exceptions.py`); handlers registered in `app/main.py` convert them, validation errors, and unhandled exceptions to responses.
 - **Auth model**: short-lived JWT access tokens; refresh tokens are rotated and stored in the DB (`RefreshToken`, keyed by `jti`) and sent as an HttpOnly cookie scoped to `/api/v1/auth`. Reusing an already-revoked refresh token revokes all of that user's sessions. Revoked access-token `jti`s are tracked in Redis (`app/security/utils/redis_util.py`), checked on every authenticated request.
-- **Background work**: Celery app is `app.core.workers.celery_worker` (task modules listed in `include=`; new task modules must be added there). Beat runs a weekly expired-refresh-token cleanup. Emails (verification, password reset) are sent via Celery tasks.
+- **Background work**: Celery app is `app.core.workers.celery_worker` (task modules listed in `include=`; new task modules must be added there). Celery handles request-triggered work only; scheduled jobs belong to Airflow (ADR 0001). The weekly expired-refresh-token cleanup is still a Beat entry in `celery_worker.py` until it is migrated, and the `celery_beat` compose service stays until then. Emails (verification, password reset) are sent via Celery tasks.
 - **Lifespan**: startup pings Postgres and Redis and aborts if either is unreachable.
 
 ## Testing
@@ -49,12 +49,28 @@ Tests are unit/controller tests with mocks: repositories use `create_autospec`, 
 ## Workflow rules
 
 - Before opening a pull request (or creating a GitHub issue), show the user the proposed title and description and wait for approval. Pushing and opening are only done when the user asks.
+- Record every measured number (before and after) in docs/METRICS.md.
+
+## Production standard
+
+Treat every feature as if it ships to production. When planning or grilling a feature:
+- Check it against CONTEXT.md and docs/adr/. If it contradicts an ADR, flag it; don't silently work around it. Changing a decision means a new ADR.
+- Ask about security before implementation, covering whichever of these apply:
+  - AuthN/AuthZ: who can call this, and is admin-only stuff (review queue, overrides) protected
+  - Input validation: Pydantic on every input, size limits, no raw user input in SQL
+  - Rate limits and cost caps on anything public or LLM-backed
+  - Secrets from env only; least-privilege DB roles (read-only role for text-to-SQL)
+  - Prompt injection: review text and user queries are data, never instructions
+  - Privacy: no usernames or personal data in logs or product_events
+  - Network: RDS reachable only from the app server, SSL required, CORS locked to the frontend
+- Ask about failure modes: timeouts, retries, idempotency, what the user sees when it breaks
+- Every feature gets an "Out of scope / known limitations" note instead of silent gaps
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues (Satveer27/F1_backend) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues (Satveer27/Anime_App_Backend) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
