@@ -1,0 +1,3 @@
+# "Does it get good?" runs on the Main line only
+
+MAL splits seasons and cours into separate entries, while IMDb groups them. The analysis therefore runs only on the Main line (the TV Sequel/Prequel chain). A branching Sequel follows the entry with the most members, each root is its own Main line, and IMDb episodes are sliced by each entry's cumulative episode count. A mismatch of more than one or two episodes sends the Franchise to the Review queue instead of guessing. Watch order is release order plus Overrides, with no LLM, so it stays deterministic and testable. Running on the whole Franchise was rejected because side stories and movies distort an episode-by-episode graph.
