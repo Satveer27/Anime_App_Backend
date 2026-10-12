@@ -8,11 +8,15 @@ from app.security.utils.jwt import decode_token, generate_refresh_token
 
 
 class TestRefreshAccessTokenService:
-    async def test_success_rotates_token(self, jwt_service, mock_token_repository, make_refresh_token):
+    async def test_success_rotates_token(
+        self, jwt_service, mock_token_repository, make_refresh_token
+    ):
         user_id = uuid4()
         raw_refresh_token = generate_refresh_token(user_id)
         decoded_original = decode_token(raw_refresh_token, "refresh")
-        existing_token = make_refresh_token(user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=False)
+        existing_token = make_refresh_token(
+            user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=False
+        )
         mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
 
         response = await jwt_service.refresh_access_token_service(raw_refresh_token)
@@ -44,12 +48,16 @@ class TestRefreshAccessTokenService:
 
         mock_token_repository.update_refresh_token.assert_not_called()
 
-    async def test_reuse_detected_revokes_all_sessions(self, jwt_service, mock_token_repository, mock_redis, make_refresh_token):
+    async def test_reuse_detected_revokes_all_sessions(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
         user_id = uuid4()
         raw_refresh_token = generate_refresh_token(user_id)
         decoded_original = decode_token(raw_refresh_token, "refresh")
         # already revoked once = this jti is being replayed
-        existing_token = make_refresh_token(user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=True)
+        existing_token = make_refresh_token(
+            user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=True
+        )
         mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
         mock_redis.zrangebyscore.return_value = []
 
@@ -70,7 +78,9 @@ class TestRefreshAccessTokenService:
 
 
 class TestLoginService:
-    async def test_success(self, jwt_service, mock_user_repository, mock_token_repository, make_user):
+    async def test_success(
+        self, jwt_service, mock_user_repository, mock_token_repository, make_user
+    ):
         user = make_user(password="CorrectPass123!", is_verified=True)
         mock_user_repository.get_user_by_email.return_value = user
 
@@ -84,7 +94,9 @@ class TestLoginService:
         new_token_arg = mock_token_repository.create_refresh_token.call_args.args[0]
         assert new_token_arg.user_id == user.id
 
-    async def test_wrong_password_raises(self, jwt_service, mock_user_repository, mock_token_repository, make_user):
+    async def test_wrong_password_raises(
+        self, jwt_service, mock_user_repository, mock_token_repository, make_user
+    ):
         user = make_user(password="CorrectPass123!")
         mock_user_repository.get_user_by_email.return_value = user
 
@@ -93,7 +105,9 @@ class TestLoginService:
 
         mock_token_repository.create_refresh_token.assert_not_called()
 
-    async def test_unverified_email_raises(self, jwt_service, mock_user_repository, mock_token_repository, make_user):
+    async def test_unverified_email_raises(
+        self, jwt_service, mock_user_repository, mock_token_repository, make_user
+    ):
         user = make_user(password="CorrectPass123!", is_verified=False)
         mock_user_repository.get_user_by_email.return_value = user
 
@@ -102,15 +116,21 @@ class TestLoginService:
 
         mock_token_repository.create_refresh_token.assert_not_called()
 
-    async def test_already_logged_in_blocks_with_valid_refresh_cookie(self, jwt_service, mock_user_repository, mock_token_repository, make_refresh_token):
+    async def test_already_logged_in_blocks_with_valid_refresh_cookie(
+        self, jwt_service, mock_user_repository, mock_token_repository, make_refresh_token
+    ):
         existing_user_id = uuid4()
         existing_refresh_token = generate_refresh_token(existing_user_id)
         decoded_existing = decode_token(existing_refresh_token, "refresh")
-        existing_token_row = make_refresh_token(user_id=existing_user_id, jti=UUID(decoded_existing["jti"]), revoke=False)
+        existing_token_row = make_refresh_token(
+            user_id=existing_user_id, jti=UUID(decoded_existing["jti"]), revoke=False
+        )
         mock_token_repository.get_refresh_token_by_jti.return_value = existing_token_row
 
         with pytest.raises(AlreadyLoggedInError):
-            await jwt_service.login_service("someone@example.com", "whatever123", refresh_token=existing_refresh_token)
+            await jwt_service.login_service(
+                "someone@example.com", "whatever123", refresh_token=existing_refresh_token
+            )
 
         # short-circuits before credentials are even checked
         mock_user_repository.get_user_by_email.assert_not_called()
@@ -138,7 +158,9 @@ class TestLogoutService:
 
         mock_token_repository.update_refresh_token.assert_not_called()
 
-    async def test_already_revoked_token_raises(self, jwt_service, mock_token_repository, make_refresh_token):
+    async def test_already_revoked_token_raises(
+        self, jwt_service, mock_token_repository, make_refresh_token
+    ):
         user_id = uuid4()
         raw_refresh_token = generate_refresh_token(user_id)
         decoded = decode_token(raw_refresh_token, "refresh")
@@ -152,7 +174,15 @@ class TestLogoutService:
 
 
 class TestLogoutAllAccounts:
-    async def test_success_bulk_revokes(self, jwt_service, mock_user_repository, mock_token_repository, mock_redis, make_user, make_refresh_token):
+    async def test_success_bulk_revokes(
+        self,
+        jwt_service,
+        mock_user_repository,
+        mock_token_repository,
+        mock_redis,
+        make_user,
+        make_refresh_token,
+    ):
         user = make_user()
         raw_refresh_token = generate_refresh_token(user.id)
         decoded = decode_token(raw_refresh_token, "refresh")
@@ -165,6 +195,8 @@ class TestLogoutAllAccounts:
         await jwt_service.logout_all_accounts(raw_refresh_token)
 
         # repository call + redis call args, not just "was revoke called"
-        mock_token_repository.update_refresh_token_to_revoke.assert_called_once_with(user_id=user.id)
+        mock_token_repository.update_refresh_token_to_revoke.assert_called_once_with(
+            user_id=user.id
+        )
         mock_redis.zrangebyscore.assert_called_once()
         assert mock_redis.zrangebyscore.call_args.args[0] == f"user_tokens:{user.id}"

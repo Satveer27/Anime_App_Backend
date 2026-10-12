@@ -10,7 +10,9 @@ class TestLoginEndpoint:
             refresh_token="newrefreshtoken", access_token="newaccesstoken"
         )
 
-        response = client.post(f"{BASE}/login", json={"email": "a@example.com", "password": "Password123!"})
+        response = client.post(
+            f"{BASE}/login", json={"email": "a@example.com", "password": "Password123!"}
+        )
 
         assert response.status_code == 200
         TokenResponse.model_validate(response.json())
@@ -23,7 +25,9 @@ class TestLoginEndpoint:
         assert "Path=/api/v1/auth" in set_cookie
         assert "SameSite=lax" in set_cookie
 
-        fake_jwt_service.login_service.assert_called_once_with("a@example.com", "Password123!", None)
+        fake_jwt_service.login_service.assert_called_once_with(
+            "a@example.com", "Password123!", None
+        )
 
     def test_malformed_body_returns_422_not_500(self, client, fake_jwt_service):
         response = client.post(f"{BASE}/login", json={"email": "not-an-email", "password": "x"})
@@ -37,10 +41,14 @@ class TestLoginEndpoint:
         )
 
         client.cookies.set("refresh_token", "existingcookie")
-        response = client.post(f"{BASE}/login", json={"email": "a@example.com", "password": "Password123!"})
+        response = client.post(
+            f"{BASE}/login", json={"email": "a@example.com", "password": "Password123!"}
+        )
 
         assert response.status_code == 200
-        fake_jwt_service.login_service.assert_called_once_with("a@example.com", "Password123!", "existingcookie")
+        fake_jwt_service.login_service.assert_called_once_with(
+            "a@example.com", "Password123!", "existingcookie"
+        )
 
 
 class TestRefreshEndpoint:
@@ -75,7 +83,9 @@ class TestLogoutEndpoint:
         fake_jwt_service.logout_service.return_value = None
 
         client.cookies.set("refresh_token", "sometoken")
-        response = client.post(f"{BASE}/logout", headers={"Authorization": "Bearer someaccesstoken"})
+        response = client.post(
+            f"{BASE}/logout", headers={"Authorization": "Bearer someaccesstoken"}
+        )
 
         assert response.status_code == 200
         SuccessMessage.model_validate(response.json())

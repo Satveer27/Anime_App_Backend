@@ -18,9 +18,11 @@ def as_current_user(client):
 
     def _apply(user_or_exc):
         if isinstance(user_or_exc, Exception):
+
             async def _dependency():
                 raise user_or_exc
         else:
+
             async def _dependency():
                 return user_or_exc
 
@@ -35,9 +37,11 @@ def as_admin_user(client):
 
     def _apply(user_or_exc):
         if isinstance(user_or_exc, Exception):
+
             async def _dependency():
                 raise user_or_exc
         else:
+
             async def _dependency():
                 return user_or_exc
 

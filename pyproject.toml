@@ -28,6 +28,17 @@ dev = [
     "pytest-mock>=3.14.0",
     "httpx>=0.28.0",
     "httpx2>=2.12.0",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]  # pycodestyle, pyflakes, import order, pyupgrade, bugbear
+ignore = [
+    "E501",  # line length is handled by `ruff format`
+    "B008",  # FastAPI uses Depends()/Query() calls in argument defaults
 ]
 
 [tool.pytest.ini_options]

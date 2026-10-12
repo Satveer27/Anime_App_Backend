@@ -1,16 +1,19 @@
-import jwt
-from app.config import settings
-import structlog
-from uuid import UUID
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import jwt
+import structlog
+
+from app.config import settings
 from app.security.exceptions import InvalidTokenError
 from app.security.utils.redis_util import track_access_token
 
 logger = structlog.get_logger()
 
+
 async def generate_access_token(user_id: UUID) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "type": "access",
@@ -23,9 +26,14 @@ async def generate_access_token(user_id: UUID) -> str:
 
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
+
 def generate_refresh_token(user_id: UUID, expiry_time: datetime | None = None) -> str:
-    now = datetime.now(timezone.utc)
-    final_expiry = expiry_time if expiry_time is not None else now + timedelta(days=settings.refresh_token_expire_days)
+    now = datetime.now(UTC)
+    final_expiry = (
+        expiry_time
+        if expiry_time is not None
+        else now + timedelta(days=settings.refresh_token_expire_days)
+    )
     payload = {
         "sub": str(user_id),
         "type": "refresh",
@@ -36,6 +44,7 @@ def generate_refresh_token(user_id: UUID, expiry_time: datetime | None = None) -
 
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
+
 def decode_token(encoded: str, expected_type: str) -> dict:
     try:
         payload = jwt.decode(encoded, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
@@ -44,13 +53,9 @@ def decode_token(encoded: str, expected_type: str) -> dict:
         raise InvalidTokenError() from exc
 
     if payload.get("type") != expected_type:
-        logger.warning("token_type_mismatch", expected_type=expected_type, actual_type=payload.get("type"))
+        logger.warning(
+            "token_type_mismatch", expected_type=expected_type, actual_type=payload.get("type")
+        )
         raise InvalidTokenError()
 
     return payload
-
-
-
-
-
-    

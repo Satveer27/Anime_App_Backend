@@ -1,6 +1,6 @@
 import os
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 environment = os.getenv("APP_ENV", "dev")
 
@@ -13,12 +13,13 @@ class Settings(BaseSettings):
     redis_backend_url: str
     log_sql: bool = False
     environment: str = environment
-    jwt_secret: str 
+    jwt_secret: str
     refresh_token_expire_days: int
     access_token_expire_minutes: int
     jwt_algorithm: str
     http_secure: bool = False
-    resend_api_key: str 
+    resend_api_key: str
     frontend_url: str
+
 
 settings = Settings()

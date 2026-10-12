@@ -44,6 +44,22 @@ _Avoid_: Client, scraper, connector
 The one-off first pass that loads the whole Catalogue, most popular Anime first.
 _Avoid_: Initial load, seed
 
+**Resource**:
+One kind of data fetched for an Anime from a source: details, statistics, reviews, characters or episodes.
+_Avoid_: Endpoint, data type
+
+**Ingestion task**:
+The unit of work that fetches one Resource for one Anime. Every Backfill and refresh is a set of Ingestion tasks.
+_Avoid_: Job, request
+
+**Gone**:
+The state of an Ingestion task whose Anime no longer exists at the source (HTTP 404). Different from a Dead letter, which failed repeatedly.
+_Avoid_: Deleted, missing
+
+**Raw layer**:
+Source responses stored untouched before any parsing, so parsing can be redone without fetching again.
+_Avoid_: Staging, cache, bronze
+
 **Selective refresh**:
 The monthly re-fetch of scores and statistics for this year's Anime and the most popular ~1,000 Anime. A full refresh of the Catalogue is a separate, manually triggered run.
 _Avoid_: Sync, update

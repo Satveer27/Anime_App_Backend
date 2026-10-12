@@ -1,6 +1,8 @@
 from fastapi import APIRouter
-from app.users.controller import user_router
+
 from app.security.controller import auth_router
+from app.users.controller import user_router
+
 main_router = APIRouter()
 
 

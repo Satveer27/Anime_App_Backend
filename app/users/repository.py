@@ -1,37 +1,41 @@
-
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.users.models import User
-from sqlalchemy import select, func
-from uuid import UUID
 from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.users.models import User
+
 
 class UserRepository:
-    def __init__(self, db:AsyncSession):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def create_user(self, user:User) -> User:
+    async def create_user(self, user: User) -> User:
         self.db.add(user)
         await self.db.flush()
         await self.db.refresh(user)
         return user
 
-    async def get_user_by_email(self, email:str) -> User | None:
+    async def get_user_by_email(self, email: str) -> User | None:
         result = await self.db.execute(select(User).where(User.email == email))
         return result.scalar_one_or_none()
 
-    async def get_user_by_id(self, user_id:UUID) -> User | None:
+    async def get_user_by_id(self, user_id: UUID) -> User | None:
         result = await self.db.execute(select(User).where(User.id == user_id))
         return result.scalar_one_or_none()
 
-    async def get_users(self, 
-                        limit: int, 
-                        offset: int, 
-                        username: str | None = None, 
-                        email: str | None = None, 
-                        is_admin: bool| None = None,
-                        created_after: datetime | None = None,
-                        created_before: datetime | None = None,
-                        username_sorted_bool: bool = False) -> list[User]:
+    async def get_users(
+        self,
+        limit: int,
+        offset: int,
+        username: str | None = None,
+        email: str | None = None,
+        is_admin: bool | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        username_sorted_bool: bool = False,
+    ) -> list[User]:
         query = select(User)
 
         if username is not None:
@@ -58,38 +62,40 @@ class UserRepository:
         result = await self.db.execute(query)
         return list(result.scalars().all())
 
-    async def count_users(self,
-                         username: str | None = None, 
-                         email: str | None = None, 
-                         is_admin: bool| None = None,
-                         created_after: datetime | None = None,
-                         created_before: datetime | None = None)-> int:
-        
+    async def count_users(
+        self,
+        username: str | None = None,
+        email: str | None = None,
+        is_admin: bool | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> int:
+
         query = select(func.count()).select_from(User)
 
         if username is not None:
             query = query.where(User.username.ilike(f"{username}%"))
-        
+
         if email is not None:
             query = query.where(User.email.ilike(f"{email}%"))
-        
+
         if is_admin is not None:
             query = query.where(User.is_admin == is_admin)
-        
+
         if created_after is not None:
             query = query.where(User.created_at >= created_after)
-        
+
         if created_before is not None:
             query = query.where(User.created_at <= created_before)
 
         result = await self.db.execute(query)
         return result.scalar_one()
 
-    async def update_user(self, user:User) -> User:
+    async def update_user(self, user: User) -> User:
         self.db.add(user)
         await self.db.flush()
         await self.db.refresh(user)
         return user
 
-    async def delete_user(self, user:User) -> None:
+    async def delete_user(self, user: User) -> None:
         await self.db.delete(user)

@@ -1,7 +1,10 @@
-from app.core.database.database import Base
-from sqlalchemy import Boolean, Column, String, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 import uuid
+
+from sqlalchemy import Boolean, Column, DateTime, String, func
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from app.core.database.database import Base
+
 
 class User(Base):
     __tablename__ = "users"
@@ -13,5 +16,3 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-

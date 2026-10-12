@@ -77,6 +77,13 @@ jobs:
           pip install uv 
           uv sync --group dev
       
+      # Lint and format checks (fail fast, before migrations and tests)
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
       # Alembic migration
       - name: run alembic migrations
         run: uv run alembic upgrade head
