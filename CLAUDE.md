@@ -49,6 +49,18 @@ Each feature is a package under `app/` (`users`, `security`) with the same layer
 
 Tests are unit/controller tests with mocks: repositories use `create_autospec`, Redis is an `AsyncMock`, Celery `.delay` is patched, and controller tests override FastAPI dependencies (`app.dependency_overrides`). The `client` fixture deliberately does not enter the app lifespan. Shared fixtures are in `tests/conftest.py`; `tests/conftest.py` sets the env vars before `app` is imported, so keep that import order.
 
+## Conventions
+
+### Logging
+
+Use structlog with key-value fields (`log.info("refresh_token_revoked", user_id=...)`), not formatted strings. Log at boundaries:
+- Adapters log external failures and retries.
+- Jobs log start, periodic progress and a summary.
+- Services log key business events.
+- Small pure utilities (e.g. the rate limiter) don't log.
+
+Log an exception once, where it is handled, not at every layer it passes through. Never log secrets or personal data (usernames, emails, tokens).
+
 ## Workflow rules
 
 - Before opening a pull request (or creating a GitHub issue), show the user the proposed title and description and wait for approval. Pushing and opening are only done when the user asks.
