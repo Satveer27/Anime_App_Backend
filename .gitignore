@@ -22,5 +22,9 @@ htmlcov/
 .vscode/
 .idea/
 
+# Probe output (raw third-party API data, see docs/METRICS.md)
+analysis/tenrai_probe/probe_metrics_*.json
+analysis/tenrai_probe/probe_results_*.jsonl
+
 # OS
 .DS_Store
