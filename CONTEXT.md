@@ -40,6 +40,10 @@ _Avoid_: Patch, manual fix
 The component that talks to exactly one external source and nothing else.
 _Avoid_: Client, scraper, connector
 
+**Catalogue source**:
+The external service the pipeline reads MAL data from (currently Tenrai, which replaced Jikan). Distinct from the MAL API, which only user-triggered work calls.
+_Avoid_: Provider, upstream
+
 **Backfill**:
 The one-off first pass that loads the whole Catalogue, most popular Anime first.
 _Avoid_: Initial load, seed
@@ -60,8 +64,12 @@ _Avoid_: Deleted, missing
 Source responses stored untouched before any parsing, so parsing can be redone without fetching again.
 _Avoid_: Staging, cache, bronze
 
+**Active tier**:
+The Anime that are Currently Airing, Not yet aired, or finished airing within the last 30 days. Refreshed weekly, with every Resource.
+_Avoid_: Current season
+
 **Selective refresh**:
-The monthly re-fetch of scores and statistics for this year's Anime and the most popular ~1,000 Anime. A full refresh of the Catalogue is a separate, manually triggered run.
+Re-fetching only part of the Catalogue: weekly for the Active tier, and monthly (details, statistics and reviews) for this year's Anime and the most popular ~1,000 Anime. A full refresh of the Catalogue is a separate, manually triggered run.
 _Avoid_: Sync, update
 
 **Match**:
