@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int
     jwt_algorithm: str
     http_secure: bool = False
+    tenrai_rate_limiter_requests_per_minute: float = 100
     resend_api_key: str
     frontend_url: str
 
