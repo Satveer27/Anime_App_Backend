@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str
     http_secure: bool = False
     tenrai_rate_limiter_requests_per_minute: float = 100
+    mal_data_base_url: str = "https://api.tenrai.org/v1"
     resend_api_key: str
     frontend_url: str
 
