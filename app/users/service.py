@@ -2,6 +2,7 @@ import secrets
 from uuid import UUID
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from app.core.redis.redis_client import redis_server
 from app.exceptions import (
@@ -52,7 +53,11 @@ class UserService:
             password=hashed_password,
         )
 
-        result = await self.user_repository.create_user(user)
+        try:
+            result = await self.user_repository.create_user(user)
+        except IntegrityError:
+            logger.warning("signup_email_conflict")
+            raise UserAlreadyExistsError() from None
 
         await redis_server.setex(f"email_verification:{token}", 900, str(result.id))
         await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
@@ -64,10 +69,10 @@ class UserService:
 
     async def verify_user_email_service(self, token: str) -> SuccessMessage:
         logger.info("email_verification_attempt")
-        result = await redis_server.get(f"email_verification:{token}")
+        result = await redis_server.getdel(f"email_verification:{token}")
 
         if not result:
-            logger.warning("email_verification_token_not_found", token=token)
+            logger.warning("email_verification_token_not_found")
             raise ResourceDoesNotExistError()
 
         user_id = UUID(result)
@@ -78,7 +83,6 @@ class UserService:
 
         user.is_verified = True
         await self.user_repository.update_user(user)
-        await redis_server.delete(f"email_verification:{token}")
         await redis_server.delete(f"email_verification_user:{user_id}")
 
         logger.info("email_verified", user_id=str(user_id))
@@ -156,9 +160,9 @@ class UserService:
         self, token: str, new_password: str
     ) -> SuccessMessage:
         logger.info("password_reset_attempt")
-        result = await redis_server.get(f"password_reset:{token}")
+        result = await redis_server.getdel(f"password_reset:{token}")
         if not result:
-            logger.warning("password_reset_token_not_found", token=token)
+            logger.warning("password_reset_token_not_found")
             raise ResourceDoesNotExistError()
 
         user_id = UUID(result)
@@ -170,7 +174,6 @@ class UserService:
         hashed_password = hash_password(new_password)
         user.password = hashed_password
         await self.user_repository.update_user(user)
-        await redis_server.delete(f"password_reset:{token}")
         await redis_server.delete(f"password_reset_user:{user_id}")
 
         # Revoke all sessions
@@ -201,7 +204,11 @@ class UserService:
 
         user.email = new_email
         user.is_verified = False
-        await self.user_repository.update_user(user)
+        try:
+            await self.user_repository.update_user(user)
+        except IntegrityError:
+            logger.warning("update_email_conflict", user_id=str(user_id))
+            raise UserAlreadyExistsError() from None
 
         await revoke_access_to_all_tokens(user.id)
         await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
@@ -355,7 +362,11 @@ class UserService:
         user.email = new_email
         user.is_verified = False
 
-        result = await self.user_repository.update_user(user)
+        try:
+            result = await self.user_repository.update_user(user)
+        except IntegrityError:
+            logger.warning("admin_update_email_conflict", user_id=str(user_id))
+            raise UserAlreadyExistsError() from None
 
         await revoke_access_to_all_tokens(user_id)
         await self.token_repository.delete_all_refresh_tokens_for_user(user_id)

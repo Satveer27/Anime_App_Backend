@@ -79,12 +79,12 @@ async def logout(
     if credentials:
         access_token = credentials.credentials
 
-    if refresh_token is None:
-        raise InvalidTokenError()
-
-    await service.logout_service(refresh_token, access_token)
+    ended_session = await service.logout_service(refresh_token, access_token)
 
     response.delete_cookie("refresh_token", path="/api/v1/auth")
+
+    if not ended_session:
+        return SuccessMessage(success_message="Already logged out of account")
 
     return SuccessMessage(success_message="Logged out successfully")
 
@@ -101,11 +101,11 @@ async def logout_all(
     service: JWTService = Depends(create_jwt_service),
 ):
 
-    if refresh_token is None:
-        raise InvalidTokenError()
-
-    await service.logout_all_accounts(refresh_token)
+    ended_sessions = await service.logout_all_accounts(refresh_token)
 
     response.delete_cookie("refresh_token", path="/api/v1/auth")
+
+    if not ended_sessions:
+        return SuccessMessage(success_message="Already logged out of all accounts")
 
     return SuccessMessage(success_message="Logged out all accounts successfully")

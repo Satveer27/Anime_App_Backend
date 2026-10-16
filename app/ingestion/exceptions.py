@@ -1,6 +1,10 @@
 class AdapterError(Exception):
     """Base class for adapter errors."""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class GoneError(AdapterError):
     """404: the resource doesn't exist. Don't retry."""

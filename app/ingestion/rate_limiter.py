@@ -9,12 +9,12 @@ class RateLimiter:
         requests_per_minute: float,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ):
+    ) -> None:
         if requests_per_minute <= 0:
             raise ValueError("requests_per_minute must be greater than 0")
 
-        self.requests_per_minute = requests_per_minute
-        self.interval: float = 60.0 / requests_per_minute
+        self._requests_per_minute = requests_per_minute
+        self._interval: float = 60.0 / requests_per_minute
         self._clock = clock
         self._sleep = sleep
         self._last_request_time: float | None = None
@@ -27,8 +27,8 @@ class RateLimiter:
                 return
 
             elapsed = self._clock() - self._last_request_time
-            if elapsed < self.interval:
-                time_to_wait = self.interval - elapsed
+            if elapsed < self._interval:
+                time_to_wait = self._interval - elapsed
                 await self._sleep(time_to_wait)
 
             self._last_request_time = self._clock()

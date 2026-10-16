@@ -39,7 +39,7 @@ async def acquire_times(limiter: RateLimiter, fake_time: FakeTime, count: int) -
 
 
 def test_interval_is_sixty_over_rate(fake_time):
-    assert make_limiter(fake_time, 100).interval == pytest.approx(0.6)
+    assert make_limiter(fake_time, 100)._interval == pytest.approx(0.6)
 
 
 @pytest.mark.parametrize("rate", [0, -1])
@@ -62,7 +62,7 @@ async def test_consecutive_calls_start_at_least_interval_apart(fake_time):
     starts = await acquire_times(limiter, fake_time, 5)
 
     gaps = [b - a for a, b in pairwise(starts)]
-    assert all(gap >= limiter.interval - 1e-9 for gap in gaps)
+    assert all(gap >= limiter._interval - 1e-9 for gap in gaps)
 
 
 async def test_call_after_partial_wait_sleeps_only_the_remainder(fake_time):
@@ -83,7 +83,7 @@ async def test_no_burst_after_long_idle_period(fake_time):
     starts = await acquire_times(limiter, fake_time, 4)
 
     gaps = [b - a for a, b in pairwise(starts)]
-    assert all(gap >= limiter.interval - 1e-9 for gap in gaps)
+    assert all(gap >= limiter._interval - 1e-9 for gap in gaps)
     assert len(fake_time.sleeps) == 3
 
 
@@ -108,4 +108,4 @@ async def test_concurrent_callers_are_spaced_out(fake_time):
     await asyncio.gather(*(worker() for _ in range(4)))
 
     gaps = [b - a for a, b in pairwise(starts)]
-    assert all(gap >= limiter.interval - 1e-9 for gap in gaps)
+    assert all(gap >= limiter._interval - 1e-9 for gap in gaps)

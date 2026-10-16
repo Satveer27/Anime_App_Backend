@@ -80,7 +80,7 @@ class TestRefreshEndpoint:
 
 class TestLogoutEndpoint:
     def test_success_deletes_refresh_cookie(self, client, fake_jwt_service):
-        fake_jwt_service.logout_service.return_value = None
+        fake_jwt_service.logout_service.return_value = True
 
         client.cookies.set("refresh_token", "sometoken")
         response = client.post(
@@ -88,7 +88,8 @@ class TestLogoutEndpoint:
         )
 
         assert response.status_code == 200
-        SuccessMessage.model_validate(response.json())
+        body = SuccessMessage.model_validate(response.json())
+        assert "Already" not in body.success_message
 
         set_cookie = response.headers.get("set-cookie")
         assert set_cookie is not None
@@ -98,8 +99,22 @@ class TestLogoutEndpoint:
 
         fake_jwt_service.logout_service.assert_called_once_with("sometoken", "someaccesstoken")
 
+    def test_already_logged_out_returns_200_and_still_clears_cookie(self, client, fake_jwt_service):
+        fake_jwt_service.logout_service.return_value = False
+
+        client.cookies.set("refresh_token", "sometoken")
+        response = client.post(f"{BASE}/logout")
+
+        assert response.status_code == 200
+        body = SuccessMessage.model_validate(response.json())
+        assert "Already" in body.success_message
+
+        set_cookie = response.headers.get("set-cookie")
+        assert set_cookie is not None
+        assert "Max-Age=0" in set_cookie
+
     def test_success_without_authorization_header(self, client, fake_jwt_service):
-        fake_jwt_service.logout_service.return_value = None
+        fake_jwt_service.logout_service.return_value = True
 
         client.cookies.set("refresh_token", "sometoken")
         response = client.post(f"{BASE}/logout")
@@ -107,22 +122,25 @@ class TestLogoutEndpoint:
         assert response.status_code == 200
         fake_jwt_service.logout_service.assert_called_once_with("sometoken", None)
 
-    def test_missing_refresh_cookie_returns_401_not_500(self, client, fake_jwt_service):
+    def test_missing_refresh_cookie_still_returns_200(self, client, fake_jwt_service):
+        fake_jwt_service.logout_service.return_value = False
+
         response = client.post(f"{BASE}/logout")
 
-        assert response.status_code == 401
-        fake_jwt_service.logout_service.assert_not_called()
+        assert response.status_code == 200
+        fake_jwt_service.logout_service.assert_called_once_with(None, None)
 
 
 class TestLogoutAllEndpoint:
     def test_success_deletes_refresh_cookie(self, client, fake_jwt_service):
-        fake_jwt_service.logout_all_accounts.return_value = None
+        fake_jwt_service.logout_all_accounts.return_value = True
 
         client.cookies.set("refresh_token", "sometoken")
         response = client.post(f"{BASE}/logout-all")
 
         assert response.status_code == 200
-        SuccessMessage.model_validate(response.json())
+        body = SuccessMessage.model_validate(response.json())
+        assert "Already" not in body.success_message
 
         set_cookie = response.headers.get("set-cookie")
         assert set_cookie is not None
@@ -132,8 +150,24 @@ class TestLogoutAllEndpoint:
 
         fake_jwt_service.logout_all_accounts.assert_called_once_with("sometoken")
 
-    def test_missing_refresh_cookie_returns_401_not_500(self, client, fake_jwt_service):
+    def test_already_logged_out_returns_200_and_still_clears_cookie(self, client, fake_jwt_service):
+        fake_jwt_service.logout_all_accounts.return_value = False
+
+        client.cookies.set("refresh_token", "sometoken")
         response = client.post(f"{BASE}/logout-all")
 
-        assert response.status_code == 401
-        fake_jwt_service.logout_all_accounts.assert_not_called()
+        assert response.status_code == 200
+        body = SuccessMessage.model_validate(response.json())
+        assert "Already" in body.success_message
+
+        set_cookie = response.headers.get("set-cookie")
+        assert set_cookie is not None
+        assert "Max-Age=0" in set_cookie
+
+    def test_missing_refresh_cookie_still_returns_200(self, client, fake_jwt_service):
+        fake_jwt_service.logout_all_accounts.return_value = False
+
+        response = client.post(f"{BASE}/logout-all")
+
+        assert response.status_code == 200
+        fake_jwt_service.logout_all_accounts.assert_called_once_with(None)

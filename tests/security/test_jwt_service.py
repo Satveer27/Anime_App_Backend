@@ -1,10 +1,13 @@
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 
+from app.config import settings
 from app.exceptions import AuthenticationError
 from app.security.exceptions import AlreadyLoggedInError
-from app.security.utils.jwt import decode_token, generate_refresh_token
+from app.security.utils.jwt import decode_token, generate_access_token, generate_refresh_token
 
 
 class TestRefreshAccessTokenService:
@@ -18,6 +21,7 @@ class TestRefreshAccessTokenService:
             user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=False
         )
         mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
+        mock_token_repository.revoke_refresh_token.return_value = 1
 
         response = await jwt_service.refresh_access_token_service(raw_refresh_token)
 
@@ -28,9 +32,10 @@ class TestRefreshAccessTokenService:
         # rotation inherits the original absolute expiry rather than sliding forward
         assert decoded_new_refresh["exp"] == decoded_original["exp"]
 
-        # old token marked revoked (single-use)
-        assert existing_token.revoke is True
-        mock_token_repository.update_refresh_token.assert_called_once_with(existing_token)
+        # old token revoked via the atomic, jti-scoped update (single-use)
+        mock_token_repository.revoke_refresh_token.assert_called_once_with(
+            UUID(decoded_original["jti"])
+        )
 
         # a new row is created for the rotated token. jti/user_id come straight off
         # the decoded JWT payload (plain str/UUID), not through a DB round-trip, so
@@ -46,7 +51,8 @@ class TestRefreshAccessTokenService:
         with pytest.raises(AuthenticationError):
             await jwt_service.refresh_access_token_service(raw_refresh_token)
 
-        mock_token_repository.update_refresh_token.assert_not_called()
+        mock_token_repository.revoke_refresh_token.assert_not_called()
+        mock_token_repository.create_refresh_token.assert_not_called()
 
     async def test_reuse_detected_revokes_all_sessions(
         self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
@@ -54,11 +60,15 @@ class TestRefreshAccessTokenService:
         user_id = uuid4()
         raw_refresh_token = generate_refresh_token(user_id)
         decoded_original = decode_token(raw_refresh_token, "refresh")
-        # already revoked once = this jti is being replayed
+        # revoked long ago (outside the grace window) = this jti is being replayed
         existing_token = make_refresh_token(
-            user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=True
+            user_id=user_id,
+            jti=UUID(decoded_original["jti"]),
+            revoke=True,
+            revoked_at=datetime.now(UTC) - timedelta(seconds=settings.refresh_grace_seconds + 60),
         )
         mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
+        mock_token_repository.revoke_refresh_token.return_value = 0
         mock_redis.zrangebyscore.return_value = []
 
         with pytest.raises(AuthenticationError):
@@ -73,7 +83,68 @@ class TestRefreshAccessTokenService:
         # right after would otherwise let get_db's exception handler roll it back
         mock_token_repository.commit.assert_called_once()
 
-        mock_token_repository.update_refresh_token.assert_not_called()
+        mock_token_repository.create_refresh_token.assert_not_called()
+
+    async def test_reuse_with_no_revoked_at_revokes_all_sessions(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        # rows revoked before the revoked_at column existed (or by logout) have NULL
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded_original = decode_token(raw_refresh_token, "refresh")
+        existing_token = make_refresh_token(
+            user_id=user_id, jti=UUID(decoded_original["jti"]), revoke=True, revoked_at=None
+        )
+        mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
+        mock_token_repository.revoke_refresh_token.return_value = 0
+        mock_redis.zrangebyscore.return_value = []
+
+        with pytest.raises(AuthenticationError):
+            await jwt_service.refresh_access_token_service(raw_refresh_token)
+
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user_id)
+        mock_token_repository.create_refresh_token.assert_not_called()
+
+    async def test_racing_refresh_inside_grace_window_does_not_wipe_sessions(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded_original = decode_token(raw_refresh_token, "refresh")
+        # the winning request revoked this jti a moment ago
+        existing_token = make_refresh_token(
+            user_id=user_id,
+            jti=UUID(decoded_original["jti"]),
+            revoke=True,
+            revoked_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        mock_token_repository.get_refresh_token_by_jti.return_value = existing_token
+        mock_token_repository.revoke_refresh_token.return_value = 0
+
+        with pytest.raises(AuthenticationError):
+            await jwt_service.refresh_access_token_service(raw_refresh_token)
+
+        # 401 only: no wipe, no commit, no Redis revoke, and the loser mints nothing
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_not_called()
+        mock_token_repository.commit.assert_not_called()
+        mock_redis.zrangebyscore.assert_not_called()
+        mock_token_repository.create_refresh_token.assert_not_called()
+
+    async def test_token_deleted_during_race_revokes_all_sessions(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded_original = decode_token(raw_refresh_token, "refresh")
+        existing_token = make_refresh_token(user_id=user_id, jti=UUID(decoded_original["jti"]))
+        # first read finds the row, the re-read after losing the race finds it deleted
+        mock_token_repository.get_refresh_token_by_jti.side_effect = [existing_token, None]
+        mock_token_repository.revoke_refresh_token.return_value = 0
+        mock_redis.zrangebyscore.return_value = []
+
+        with pytest.raises(AuthenticationError):
+            await jwt_service.refresh_access_token_service(raw_refresh_token)
+
         mock_token_repository.create_refresh_token.assert_not_called()
 
 
@@ -144,21 +215,22 @@ class TestLogoutService:
         current_token = make_refresh_token(user_id=user_id, jti=UUID(decoded["jti"]), revoke=False)
         mock_token_repository.get_refresh_token_by_jti.return_value = current_token
 
-        await jwt_service.logout_service(raw_refresh_token)
+        result = await jwt_service.logout_service(raw_refresh_token)
 
+        assert result is True
         assert current_token.revoke is True
         mock_token_repository.update_refresh_token.assert_called_once_with(current_token)
 
-    async def test_token_not_found_raises(self, jwt_service, mock_token_repository):
+    async def test_token_not_found_is_idempotent(self, jwt_service, mock_token_repository):
         raw_refresh_token = generate_refresh_token(uuid4())
         mock_token_repository.get_refresh_token_by_jti.return_value = None
 
-        with pytest.raises(AuthenticationError):
-            await jwt_service.logout_service(raw_refresh_token)
+        result = await jwt_service.logout_service(raw_refresh_token)
 
+        assert result is False
         mock_token_repository.update_refresh_token.assert_not_called()
 
-    async def test_already_revoked_token_raises(
+    async def test_already_revoked_token_is_idempotent(
         self, jwt_service, mock_token_repository, make_refresh_token
     ):
         user_id = uuid4()
@@ -167,10 +239,39 @@ class TestLogoutService:
         current_token = make_refresh_token(user_id=user_id, jti=UUID(decoded["jti"]), revoke=True)
         mock_token_repository.get_refresh_token_by_jti.return_value = current_token
 
-        with pytest.raises(AuthenticationError):
-            await jwt_service.logout_service(raw_refresh_token)
+        result = await jwt_service.logout_service(raw_refresh_token)
 
+        assert result is False
         mock_token_repository.update_refresh_token.assert_not_called()
+
+    async def test_missing_refresh_token_is_idempotent(self, jwt_service, mock_token_repository):
+        result = await jwt_service.logout_service(None)
+
+        assert result is False
+        mock_token_repository.get_refresh_token_by_jti.assert_not_called()
+
+    async def test_garbage_refresh_token_is_idempotent(self, jwt_service, mock_token_repository):
+        result = await jwt_service.logout_service("not-a-jwt")
+
+        assert result is False
+        mock_token_repository.get_refresh_token_by_jti.assert_not_called()
+
+    async def test_access_token_revoked_even_when_refresh_already_gone(
+        self, jwt_service, mock_token_repository
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        access_token = await generate_access_token(user_id)
+        decoded_access = decode_token(access_token, "access")
+        mock_token_repository.get_refresh_token_by_jti.return_value = None
+
+        with patch("app.security.service.revoke_single_access_token") as revoke_access:
+            result = await jwt_service.logout_service(raw_refresh_token, access_token)
+
+        assert result is False
+        revoke_access.assert_awaited_once_with(
+            decoded_access["jti"], decoded_access["exp"], user_id
+        )
 
 
 class TestLogoutAllAccounts:
@@ -192,11 +293,67 @@ class TestLogoutAllAccounts:
         mock_token_repository.update_refresh_token_to_revoke.return_value = 3
         mock_redis.zrangebyscore.return_value = []
 
-        await jwt_service.logout_all_accounts(raw_refresh_token)
+        result = await jwt_service.logout_all_accounts(raw_refresh_token)
 
+        assert result is True
         # repository call + redis call args, not just "was revoke called"
         mock_token_repository.update_refresh_token_to_revoke.assert_called_once_with(
             user_id=user.id
         )
         mock_redis.zrangebyscore.assert_called_once()
         assert mock_redis.zrangebyscore.call_args.args[0] == f"user_tokens:{user.id}"
+
+    async def test_token_not_found_is_idempotent(self, jwt_service, mock_token_repository):
+        raw_refresh_token = generate_refresh_token(uuid4())
+        mock_token_repository.get_refresh_token_by_jti.return_value = None
+
+        result = await jwt_service.logout_all_accounts(raw_refresh_token)
+
+        assert result is False
+        mock_token_repository.update_refresh_token_to_revoke.assert_not_called()
+
+    async def test_missing_refresh_token_is_idempotent(self, jwt_service, mock_token_repository):
+        result = await jwt_service.logout_all_accounts(None)
+
+        assert result is False
+        mock_token_repository.get_refresh_token_by_jti.assert_not_called()
+
+    async def test_garbage_refresh_token_is_idempotent(self, jwt_service, mock_token_repository):
+        result = await jwt_service.logout_all_accounts("not-a-jwt")
+
+        assert result is False
+        mock_token_repository.get_refresh_token_by_jti.assert_not_called()
+
+    async def test_user_not_found_is_idempotent(
+        self,
+        jwt_service,
+        mock_user_repository,
+        mock_token_repository,
+        make_refresh_token,
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded = decode_token(raw_refresh_token, "refresh")
+        current_token = make_refresh_token(user_id=user_id, jti=UUID(decoded["jti"]), revoke=False)
+        mock_token_repository.get_refresh_token_by_jti.return_value = current_token
+        mock_user_repository.get_user_by_id.return_value = None
+
+        result = await jwt_service.logout_all_accounts(raw_refresh_token)
+
+        assert result is False
+        mock_token_repository.update_refresh_token_to_revoke.assert_not_called()
+
+    async def test_already_revoked_token_is_idempotent(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded = decode_token(raw_refresh_token, "refresh")
+        current_token = make_refresh_token(user_id=user_id, jti=UUID(decoded["jti"]), revoke=True)
+        mock_token_repository.get_refresh_token_by_jti.return_value = current_token
+
+        result = await jwt_service.logout_all_accounts(raw_refresh_token)
+
+        assert result is False
+        mock_token_repository.update_refresh_token_to_revoke.assert_not_called()
+        mock_redis.zrangebyscore.assert_not_called()
