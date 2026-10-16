@@ -2,11 +2,14 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from kombu.exceptions import OperationalError
+from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import (
     AuthenticationError,
     ForbiddenError,
     ResourceDoesNotExistError,
+    ServiceUnavailableError,
     TooManyRequestsError,
 )
 from app.security.utils.password import check_password
@@ -63,11 +66,67 @@ class TestCreateUserService:
         mock_redis.setex.assert_not_called()
         mock_celery_tasks["verification"].assert_not_called()
 
+    async def test_email_taken_in_race_raises_already_exists(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks
+    ):
+        from app.users.schemas import UserCreateSchema
+
+        # the pre-check passes, but a concurrent signup wins the unique constraint
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.side_effect = IntegrityError("stmt", {}, Exception())
+
+        payload = UserCreateSchema(
+            email="taken@example.com", password="Password123!", username="newuser"
+        )
+        with pytest.raises(UserAlreadyExistsError):
+            await user_service.create_user_service(payload)
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
+
+    async def test_commits_before_redis_and_email(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        from app.users.schemas import UserCreateSchema
+
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.return_value = make_user(email="new@example.com")
+        events: list[str] = []
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mock_redis.setex.side_effect = lambda *a, **k: events.append("setex")
+        mock_celery_tasks["verification"].side_effect = lambda *a, **k: events.append("delay")
+
+        payload = UserCreateSchema(
+            email="new@example.com", password="Password123!", username="newuser"
+        )
+        await user_service.create_user_service(payload)
+
+        assert events[0] == "commit"
+        assert set(events[1:]) == {"setex", "delay"}
+
+    async def test_commit_failure_writes_no_tokens_and_sends_no_email(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        from app.users.schemas import UserCreateSchema
+
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.return_value = make_user(email="new@example.com")
+        mock_user_repository.commit.side_effect = RuntimeError("db down")
+
+        payload = UserCreateSchema(
+            email="new@example.com", password="Password123!", username="newuser"
+        )
+        with pytest.raises(RuntimeError):
+            await user_service.create_user_service(payload)
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
+
 
 class TestVerifyUserEmailService:
     async def test_success(self, user_service, mock_user_repository, mock_redis, make_user):
         user = make_user(is_verified=False)
-        mock_redis.get.return_value = str(user.id)
+        mock_redis.getdel.return_value = str(user.id)
         mock_user_repository.get_user_by_id.return_value = user
         mock_user_repository.update_user.return_value = user
 
@@ -76,20 +135,34 @@ class TestVerifyUserEmailService:
         assert result.success_message == "Email verified successfully."
         assert user.is_verified is True
         mock_user_repository.update_user.assert_called_once_with(user)
-        assert mock_redis.delete.call_count == 2
-        mock_redis.delete.assert_any_call("email_verification:sometoken")
-        mock_redis.delete.assert_any_call(f"email_verification_user:{user.id}")
+        # the token is consumed atomically on read, so it is single-use
+        mock_redis.getdel.assert_called_once_with("email_verification:sometoken")
+        mock_redis.delete.assert_called_once_with(f"email_verification_user:{user.id}")
 
     async def test_token_not_found(self, user_service, mock_user_repository, mock_redis):
-        mock_redis.get.return_value = None
+        mock_redis.getdel.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.verify_user_email_service("badtoken")
 
         mock_user_repository.get_user_by_id.assert_not_called()
 
+    async def test_db_failure_after_token_consumed_leaves_user_unverified(
+        self, user_service, mock_user_repository, mock_redis, make_user
+    ):
+        user = make_user(is_verified=False)
+        mock_redis.getdel.return_value = str(user.id)
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.update_user.side_effect = RuntimeError("db down")
+
+        with pytest.raises(RuntimeError):
+            await user_service.verify_user_email_service("sometoken")
+
+        # the user's mapping key is kept so the resend flow can still replace it
+        mock_redis.delete.assert_not_called()
+
     async def test_user_not_found(self, user_service, mock_user_repository, mock_redis):
-        mock_redis.get.return_value = str(uuid4())
+        mock_redis.getdel.return_value = str(uuid4())
         mock_user_repository.get_user_by_id.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
@@ -104,12 +177,13 @@ class TestResendEmailVerificationService:
     ):
         user = make_user(is_verified=False)
         mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
         mock_redis.get.return_value = None
 
         result = await user_service.resend_email_verification_service(user.email)
 
         assert "If the email exists" in result.success_message
-        assert mock_redis.setex.call_count == 3
+        assert mock_redis.setex.call_count == 2
         mock_redis.delete.assert_not_called()
         mock_celery_tasks["verification"].assert_called_once()
         assert mock_celery_tasks["verification"].call_args.args[0] == user.email
@@ -119,7 +193,8 @@ class TestResendEmailVerificationService:
     ):
         user = make_user(is_verified=False)
         mock_user_repository.get_user_by_email.return_value = user
-        mock_redis.get.side_effect = [None, "old-token"]
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = "old-token"
 
         await user_service.resend_email_verification_service(user.email)
 
@@ -148,13 +223,35 @@ class TestResendEmailVerificationService:
         mock_redis.get.assert_not_called()
         mock_celery_tasks["verification"].assert_not_called()
 
-    async def test_rate_limited(self, user_service, mock_user_repository, mock_redis, make_user):
+    async def test_rate_limited(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
         user = make_user(is_verified=False)
         mock_user_repository.get_user_by_email.return_value = user
-        mock_redis.get.return_value = "1"
+        mock_redis.set.return_value = None
 
         with pytest.raises(TooManyRequestsError):
             await user_service.resend_email_verification_service(user.email)
+
+        # the cooldown is taken atomically (NX), and a loser sends and writes nothing
+        mock_redis.set.assert_called_once_with(f"resend_cooldown:{user.id}", "1", nx=True, ex=300)
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
+
+    async def test_enqueue_failure_releases_cooldown(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user(is_verified=False)
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = None
+        mock_celery_tasks["verification"].side_effect = OperationalError("broker down")
+
+        with pytest.raises(ServiceUnavailableError):
+            await user_service.resend_email_verification_service(user.email)
+
+        # nothing was queued, so the user can retry immediately
+        mock_redis.delete.assert_called_once_with(f"resend_cooldown:{user.id}")
 
 
 class TestForgotPasswordService:
@@ -163,12 +260,13 @@ class TestForgotPasswordService:
     ):
         user = make_user()
         mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
         mock_redis.get.return_value = None
 
         result = await user_service.forgot_password_service(user.email)
 
         assert "If the email exists" in result.success_message
-        assert mock_redis.setex.call_count == 3
+        assert mock_redis.setex.call_count == 2
         mock_redis.delete.assert_not_called()
         mock_celery_tasks["password_reset"].assert_called_once()
         assert mock_celery_tasks["password_reset"].call_args.args[0] == user.email
@@ -178,7 +276,8 @@ class TestForgotPasswordService:
     ):
         user = make_user()
         mock_user_repository.get_user_by_email.return_value = user
-        mock_redis.get.side_effect = [None, "old-token"]
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = "old-token"
 
         await user_service.forgot_password_service(user.email)
 
@@ -195,13 +294,37 @@ class TestForgotPasswordService:
         mock_redis.get.assert_not_called()
         mock_celery_tasks["password_reset"].assert_not_called()
 
-    async def test_rate_limited(self, user_service, mock_user_repository, mock_redis, make_user):
+    async def test_rate_limited(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
         user = make_user()
         mock_user_repository.get_user_by_email.return_value = user
-        mock_redis.get.return_value = "1"
+        mock_redis.set.return_value = None
 
         with pytest.raises(TooManyRequestsError):
             await user_service.forgot_password_service(user.email)
+
+        # the losing caller must not touch the winner's token or send a second email
+        mock_redis.set.assert_called_once_with(
+            f"forgot_password_cooldown:{user.id}", "1", nx=True, ex=300
+        )
+        mock_redis.delete.assert_not_called()
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["password_reset"].assert_not_called()
+
+    async def test_enqueue_failure_releases_cooldown(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user()
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = None
+        mock_celery_tasks["password_reset"].side_effect = OperationalError("broker down")
+
+        with pytest.raises(ServiceUnavailableError):
+            await user_service.forgot_password_service(user.email)
+
+        mock_redis.delete.assert_called_once_with(f"forgot_password_cooldown:{user.id}")
 
 
 class TestResetPasswordServiceViaEmail:
@@ -210,7 +333,7 @@ class TestResetPasswordServiceViaEmail:
     ):
         user = make_user()
         old_password_hash = user.password
-        mock_redis.get.return_value = str(user.id)
+        mock_redis.getdel.return_value = str(user.id)
         mock_redis.zrangebyscore.return_value = []
         mock_user_repository.get_user_by_id.return_value = user
         mock_user_repository.update_user.return_value = user
@@ -222,9 +345,9 @@ class TestResetPasswordServiceViaEmail:
         assert result.success_message == "Password reset successfully."
         assert user.password != old_password_hash
         assert check_password("BrandNewPass123!", user.password)
-        assert mock_redis.delete.call_count == 2
-        mock_redis.delete.assert_any_call("password_reset:sometoken")
-        mock_redis.delete.assert_any_call(f"password_reset_user:{user.id}")
+        # the token is consumed atomically on read, so it is single-use
+        mock_redis.getdel.assert_called_once_with("password_reset:sometoken")
+        mock_redis.delete.assert_called_once_with(f"password_reset_user:{user.id}")
 
         # sessions revoked: refresh tokens deleted + access tokens revoked in redis
         mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
@@ -232,7 +355,7 @@ class TestResetPasswordServiceViaEmail:
         assert mock_redis.zrangebyscore.call_args.args[0] == f"user_tokens:{user.id}"
 
     async def test_token_not_found(self, user_service, mock_user_repository, mock_redis):
-        mock_redis.get.return_value = None
+        mock_redis.getdel.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.reset_password_service_via_email("badtoken", "NewPass123!")
@@ -240,7 +363,7 @@ class TestResetPasswordServiceViaEmail:
         mock_user_repository.get_user_by_id.assert_not_called()
 
     async def test_user_not_found(self, user_service, mock_user_repository, mock_redis):
-        mock_redis.get.return_value = str(uuid4())
+        mock_redis.getdel.return_value = str(uuid4())
         mock_user_repository.get_user_by_id.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
@@ -321,11 +444,64 @@ class TestUpdateEmailService:
 
         mock_user_repository.update_user.assert_not_called()
 
+    async def test_email_taken_in_race_raises_already_exists(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.update_user.side_effect = IntegrityError("stmt", {}, Exception())
+
+        with pytest.raises(UserAlreadyExistsError):
+            await user_service.update_email_service(user.id, "new@example.com")
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
+
     async def test_user_not_found(self, user_service, mock_user_repository):
         mock_user_repository.get_user_by_id.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.update_email_service(uuid4(), "new@example.com")
+
+    async def test_commits_before_redis_and_email(
+        self,
+        user_service,
+        mock_user_repository,
+        mock_token_repository,
+        mock_redis,
+        mock_celery_tasks,
+        make_user,
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_redis.get.return_value = None
+        mock_redis.zrangebyscore.return_value = []
+        events: list[str] = []
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mock_redis.setex.side_effect = lambda *a, **k: events.append("setex")
+        mock_celery_tasks["verification"].side_effect = lambda *a, **k: events.append("delay")
+
+        await user_service.update_email_service(user.id, "new@example.com")
+
+        assert events[0] == "commit"
+        assert set(events[1:]) == {"setex", "delay"}
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
+
+    async def test_commit_failure_writes_no_tokens_and_sends_no_email(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.commit.side_effect = RuntimeError("db down")
+
+        with pytest.raises(RuntimeError):
+            await user_service.update_email_service(user.id, "new@example.com")
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
 
 
 class TestUpdateUserFieldsService:
@@ -392,6 +568,36 @@ class TestDeleteCurrentUserService:
             await user_service.delete_current_user_service(user.id)
 
         mock_user_repository.delete_user.assert_not_called()
+
+    async def test_self_delete_deletes_commits_then_revokes_redis(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        user = make_user(is_admin=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        events: list[str] = []
+        mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=lambda uid: events.append("revoke"),
+        )
+
+        await user_service.delete_current_user_service(user.id)
+
+        assert events == ["delete", "commit", "revoke"]
+
+    async def test_self_delete_commit_failure_does_not_revoke_redis(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        user = make_user(is_admin=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.commit.side_effect = RuntimeError("db down")
+        revoke = mocker.patch("app.users.service.revoke_access_to_all_tokens")
+
+        with pytest.raises(RuntimeError):
+            await user_service.delete_current_user_service(user.id)
+
+        revoke.assert_not_called()
 
 
 class TestUpdateUserPasswordService:
@@ -529,11 +735,65 @@ class TestUpdateUserEmailByIdService:
         with pytest.raises(UserAlreadyExistsError):
             await user_service.update_user_email_by_id_service(user.id, "new@example.com", uuid4())
 
+    async def test_email_taken_in_race_raises_already_exists(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.update_user.side_effect = IntegrityError("stmt", {}, Exception())
+
+        with pytest.raises(UserAlreadyExistsError):
+            await user_service.update_user_email_by_id_service(user.id, "new@example.com", uuid4())
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
+
     async def test_user_not_found(self, user_service, mock_user_repository):
         mock_user_repository.get_user_by_id.return_value = None
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.update_user_email_by_id_service(uuid4(), "new@example.com", uuid4())
+
+    async def test_commits_before_redis_and_email(
+        self,
+        user_service,
+        mock_user_repository,
+        mock_token_repository,
+        mock_redis,
+        mock_celery_tasks,
+        make_user,
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_redis.get.return_value = None
+        mock_redis.zrangebyscore.return_value = []
+        mock_user_repository.update_user.return_value = user
+        events: list[str] = []
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mock_redis.setex.side_effect = lambda *a, **k: events.append("setex")
+        mock_celery_tasks["verification"].side_effect = lambda *a, **k: events.append("delay")
+
+        await user_service.update_user_email_by_id_service(user.id, "new@example.com", uuid4())
+
+        assert events[0] == "commit"
+        assert set(events[1:]) == {"setex", "delay"}
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user.id)
+
+    async def test_commit_failure_writes_no_tokens_and_sends_no_email(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        user = make_user(email="old@example.com")
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.commit.side_effect = RuntimeError("db down")
+
+        with pytest.raises(RuntimeError):
+            await user_service.update_user_email_by_id_service(user.id, "new@example.com", uuid4())
+
+        mock_redis.setex.assert_not_called()
+        mock_celery_tasks["verification"].assert_not_called()
 
 
 class TestDeleteUserByIdService:
@@ -569,6 +829,36 @@ class TestDeleteUserByIdService:
 
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.delete_user_by_id_service(uuid4(), admin_id=uuid4())
+
+    async def test_admin_delete_deletes_commits_then_revokes_redis(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        user = make_user(is_admin=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        events: list[str] = []
+        mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=lambda uid: events.append("revoke"),
+        )
+
+        await user_service.delete_user_by_id_service(user.id, admin_id=uuid4())
+
+        assert events == ["delete", "commit", "revoke"]
+
+    async def test_admin_delete_commit_failure_does_not_revoke_redis(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        user = make_user(is_admin=False)
+        mock_user_repository.get_user_by_id.return_value = user
+        mock_user_repository.commit.side_effect = RuntimeError("db down")
+        revoke = mocker.patch("app.users.service.revoke_access_to_all_tokens")
+
+        with pytest.raises(RuntimeError):
+            await user_service.delete_user_by_id_service(user.id, admin_id=uuid4())
+
+        revoke.assert_not_called()
 
 
 class TestDeleteMultipleUsersByIdsService:
@@ -607,3 +897,27 @@ class TestDeleteMultipleUsersByIdsService:
         assert result.not_found == [not_found_id]
         assert result.skipped_admins == [admin_user.id]
         mock_user_repository.delete_user.assert_called_once_with(deletable_user)
+
+    async def test_each_delete_is_committed_before_its_redis_revoke(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        first, second = make_user(is_admin=False), make_user(is_admin=False)
+        users = {first.id: first, second.id: second}
+
+        async def get_user_by_id(user_id):
+            return users[user_id]
+
+        mock_user_repository.get_user_by_id.side_effect = get_user_by_id
+        events: list[str] = []
+        mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=lambda uid: events.append("revoke"),
+        )
+
+        await user_service.delete_multiple_users_by_ids_service(
+            [first.id, second.id], admin_id=uuid4()
+        )
+
+        assert events == ["delete", "commit", "revoke"] * 2

@@ -23,11 +23,21 @@ class RefreshTokenRepository:
         await self.db.refresh(refresh_token)
         return refresh_token
 
+    async def revoke_refresh_token(self, jti: UUID) -> int:
+        result = await self.db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.jti == jti, RefreshToken.revoke.is_(False))
+            .values(revoke=True, revoked_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount
+
     async def update_refresh_token_to_revoke(self, user_id: UUID) -> int:
         result = await self.db.execute(
             update(RefreshToken)
             .where(RefreshToken.user_id == user_id, RefreshToken.revoke.is_(False))
-            .values(revoke=True)
+            .values(revoke=True, revoked_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
         )
         return result.rowcount
 
@@ -41,7 +51,11 @@ class RefreshTokenRepository:
         await self.db.commit()
 
     async def get_refresh_token_by_jti(self, refresh_id: UUID) -> RefreshToken | None:
-        result = await self.db.execute(select(RefreshToken).where(RefreshToken.jti == refresh_id))
+        result = await self.db.execute(
+            select(RefreshToken)
+            .where(RefreshToken.jti == refresh_id)
+            .execution_options(populate_existing=True)
+        )
         return result.scalar_one_or_none()
 
     async def get_refresh_token_by_user_id(self, user_id: UUID) -> list[RefreshToken]:

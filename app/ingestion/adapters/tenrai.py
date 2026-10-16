@@ -56,14 +56,20 @@ class TenraiAdapter:
                 r = await self._client.get(endpoint, params=params)
             except httpx.TransportError as e:
                 last_error = type(e).__name__
+                last_status = None
                 last_was_network = True
                 wait = backoff
                 log.warning(
-                    "tenrai_network_error", endpoint=endpoint, error=last_error, attempt=attempt
+                    "tenrai_network_error",
+                    endpoint=endpoint,
+                    error=last_error,
+                    attempt=attempt,
+                    wait_s=wait,
                 )
             else:
                 if r.status_code == 429:
                     last_error = "429"
+                    last_status = 429
                     last_was_network = False
                     wait = self._retry_after(r)
                     log.warning(
@@ -71,6 +77,7 @@ class TenraiAdapter:
                     )
                 elif r.status_code in RETRYABLE_STATUSES:
                     last_error = str(r.status_code)
+                    last_status = r.status_code
                     last_was_network = False
                     wait = backoff
                     log.warning(
@@ -78,22 +85,27 @@ class TenraiAdapter:
                         endpoint=endpoint,
                         status=r.status_code,
                         attempt=attempt,
+                        wait_s=wait,
                     )
                 else:
                     if r.status_code == 404:
-                        raise GoneError(endpoint)
+                        raise GoneError(f"404 {endpoint}", status_code=404)
                     if r.status_code != 200:
-                        raise PermanentError(f"{r.status_code} {endpoint}")
+                        raise PermanentError(
+                            f"{r.status_code} {endpoint}", status_code=r.status_code
+                        )
                     try:
                         return r.json()
                     except ValueError as e:
-                        raise PermanentError(f"invalid JSON {endpoint}") from e
+                        raise PermanentError(f"invalid JSON {endpoint}", status_code=200) from e
 
             if attempt < self._max_attempts:
                 await self._sleep(wait)
 
         message = f"{endpoint} failed after {self._max_attempts} attempts: {last_error}"
-        raise (NetworkError if last_was_network else TransientError)(message)
+        raise (NetworkError if last_was_network else TransientError)(
+            message, status_code=last_status
+        )
 
     async def _get(self, endpoint: str, params: dict | None = None) -> dict:
         self._breaker.check()
@@ -106,10 +118,17 @@ class TenraiAdapter:
             raise
         except (GoneError, PermanentError):
             # Tenrai answered, so it is up.
+            was_open = self._breaker.is_open
             self._breaker.record_success()
+            if was_open:
+                log.info("tenrai_circuit_closed", endpoint=endpoint)
             raise
 
+        was_open = self._breaker.is_open
         self._breaker.record_success()
+        if was_open:
+            log.info("tenrai_circuit_closed", endpoint=endpoint)
+
         return data
 
     async def get_full(self, anime_id: int) -> dict:

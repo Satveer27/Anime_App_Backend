@@ -2,12 +2,15 @@ import secrets
 from uuid import UUID
 
 import structlog
+from kombu.exceptions import OperationalError
+from sqlalchemy.exc import IntegrityError
 
 from app.core.redis.redis_client import redis_server
 from app.exceptions import (
     AuthenticationError,
     ForbiddenError,
     ResourceDoesNotExistError,
+    ServiceUnavailableError,
     TooManyRequestsError,
 )
 from app.schemas import SuccessMessage
@@ -52,7 +55,14 @@ class UserService:
             password=hashed_password,
         )
 
-        result = await self.user_repository.create_user(user)
+        try:
+            result = await self.user_repository.create_user(user)
+        except IntegrityError:
+            logger.warning("signup_email_conflict")
+            raise UserAlreadyExistsError() from None
+
+        # persist first: Redis tokens and the queued email must never outlive a rolled-back user
+        await self.user_repository.commit()
 
         await redis_server.setex(f"email_verification:{token}", 900, str(result.id))
         await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
@@ -64,10 +74,10 @@ class UserService:
 
     async def verify_user_email_service(self, token: str) -> SuccessMessage:
         logger.info("email_verification_attempt")
-        result = await redis_server.get(f"email_verification:{token}")
+        result = await redis_server.getdel(f"email_verification:{token}")
 
         if not result:
-            logger.warning("email_verification_token_not_found", token=token)
+            logger.warning("email_verification_token_not_found")
             raise ResourceDoesNotExistError()
 
         user_id = UUID(result)
@@ -78,7 +88,6 @@ class UserService:
 
         user.is_verified = True
         await self.user_repository.update_user(user)
-        await redis_server.delete(f"email_verification:{token}")
         await redis_server.delete(f"email_verification_user:{user_id}")
 
         logger.info("email_verified", user_id=str(user_id))
@@ -99,8 +108,9 @@ class UserService:
             )
 
         cooldown_key = f"resend_cooldown:{user.id}"
-        on_cooldown = await redis_server.get(cooldown_key)
-        if on_cooldown:
+        # NX makes check-and-set one atomic step: only one concurrent caller gets the cooldown
+        acquired = await redis_server.set(cooldown_key, "1", nx=True, ex=300)
+        if not acquired:
             logger.warning("resend_verification_rate_limited", user_id=str(user.id))
             raise TooManyRequestsError("Please wait before requesting another verification email.")
 
@@ -111,9 +121,14 @@ class UserService:
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
         await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
-        await redis_server.setex(cooldown_key, 300, "1")  # Set cooldown for 5 minutes
 
-        send_email_verification_task.delay(user.email, token)
+        try:
+            send_email_verification_task.delay(user.email, token)
+        except OperationalError:
+            # nothing was queued, so release the cooldown instead of making them wait 5 minutes
+            logger.error("verification_email_enqueue_failed", user_id=str(user.id))
+            await redis_server.delete(cooldown_key)
+            raise ServiceUnavailableError("Could not send the email, please try again.") from None
 
         logger.info("resend_email_verification_sent", user_id=str(user.id))
         return SuccessMessage(
@@ -129,14 +144,13 @@ class UserService:
                 success_message="If the email exists, a password reset email has been sent. Please check your inbox."
             )
 
-        on_cooldown = await redis_server.get(f"forgot_password_cooldown:{user.id}")
-        if on_cooldown:
+        cooldown_key = f"forgot_password_cooldown:{user.id}"
+        acquired = await redis_server.set(cooldown_key, "1", nx=True, ex=300)
+        if not acquired:
             logger.warning("forgot_password_rate_limited", user_id=str(user.id))
             raise TooManyRequestsError(
                 "Please wait before requesting another password reset email."
             )
-
-        await redis_server.setex(f"forgot_password_cooldown:{user.id}", 300, "1")
 
         previous_token = await redis_server.get(f"password_reset_user:{user.id}")
         if previous_token:
@@ -145,7 +159,12 @@ class UserService:
         token = secrets.token_urlsafe(32)
         await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
         await redis_server.setex(f"password_reset_user:{user.id}", 900, token)
-        send_email_password_reset_task.delay(user.email, token)
+        try:
+            send_email_password_reset_task.delay(user.email, token)
+        except OperationalError:
+            logger.error("password_reset_email_enqueue_failed", user_id=str(user.id))
+            await redis_server.delete(cooldown_key)
+            raise ServiceUnavailableError("Could not send the email, please try again.") from None
 
         logger.info("forgot_password_requested", user_id=str(user.id))
         return SuccessMessage(
@@ -156,9 +175,9 @@ class UserService:
         self, token: str, new_password: str
     ) -> SuccessMessage:
         logger.info("password_reset_attempt")
-        result = await redis_server.get(f"password_reset:{token}")
+        result = await redis_server.getdel(f"password_reset:{token}")
         if not result:
-            logger.warning("password_reset_token_not_found", token=token)
+            logger.warning("password_reset_token_not_found")
             raise ResourceDoesNotExistError()
 
         user_id = UUID(result)
@@ -170,7 +189,6 @@ class UserService:
         hashed_password = hash_password(new_password)
         user.password = hashed_password
         await self.user_repository.update_user(user)
-        await redis_server.delete(f"password_reset:{token}")
         await redis_server.delete(f"password_reset_user:{user_id}")
 
         # Revoke all sessions
@@ -201,10 +219,16 @@ class UserService:
 
         user.email = new_email
         user.is_verified = False
-        await self.user_repository.update_user(user)
+        try:
+            await self.user_repository.update_user(user)
+        except IntegrityError:
+            logger.warning("update_email_conflict", user_id=str(user_id))
+            raise UserAlreadyExistsError() from None
+
+        await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
+        await self.user_repository.commit()
 
         await revoke_access_to_all_tokens(user.id)
-        await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
 
         previous_token = await redis_server.get(f"email_verification_user:{user.id}")
         if previous_token:
@@ -251,8 +275,9 @@ class UserService:
             logger.warning("admin_self_delete_blocked", user_id=str(user_id))
             raise ForbiddenError("Admins cannot delete their own account.")
 
-        await revoke_access_to_all_tokens(user.id)
         await self.user_repository.delete_user(user)
+        await self.user_repository.commit()
+        await revoke_access_to_all_tokens(user.id)
 
         logger.info("user_deleted_successfully", user_id=str(user_id))
         return SuccessMessage(success_message="User deleted successfully.")
@@ -355,10 +380,16 @@ class UserService:
         user.email = new_email
         user.is_verified = False
 
-        result = await self.user_repository.update_user(user)
+        try:
+            result = await self.user_repository.update_user(user)
+        except IntegrityError:
+            logger.warning("admin_update_email_conflict", user_id=str(user_id))
+            raise UserAlreadyExistsError() from None
+
+        await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
+        await self.user_repository.commit()
 
         await revoke_access_to_all_tokens(user_id)
-        await self.token_repository.delete_all_refresh_tokens_for_user(user_id)
 
         previous_token = await redis_server.get(f"email_verification_user:{user.id}")
         if previous_token:
@@ -395,8 +426,9 @@ class UserService:
             )
             raise ForbiddenError("You cannot delete another admins account.")
 
-        await revoke_access_to_all_tokens(user_id)
         await self.user_repository.delete_user(user)
+        await self.user_repository.commit()
+        await revoke_access_to_all_tokens(user_id)
 
         logger.info("admin_deleted_user", admin_id=str(admin_id), user_id=str(user_id))
         return SuccessMessage(success_message="User deleted successfully.")
@@ -429,8 +461,9 @@ class UserService:
                 skipped_admin_ids.append(str(user_id))
 
             else:
-                await revoke_access_to_all_tokens(user_id)
                 await self.user_repository.delete_user(user)
+                await self.user_repository.commit()
+                await revoke_access_to_all_tokens(user_id)
                 deleted_ids.append(str(user_id))
 
         logger.info(

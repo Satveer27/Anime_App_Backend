@@ -101,12 +101,14 @@ def make_refresh_token():
         user_id: uuid.UUID,
         jti: uuid.UUID | None = None,
         revoke: bool = False,
+        revoked_at: datetime | None = None,
         expires_at: datetime | None = None,
     ) -> RefreshToken:
         return RefreshToken(
             jti=jti or uuid.uuid4(),
             user_id=user_id,
             revoke=revoke,
+            revoked_at=revoked_at,
             expires_at=expires_at or datetime.now(UTC),
         )
 

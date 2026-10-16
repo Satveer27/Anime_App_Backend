@@ -10,7 +10,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         cooldown_s: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
-    ):
+    ) -> None:
         if failure_threshold < 1:
             raise ValueError("failure_threshold must be at least 1")
         if cooldown_s <= 0:

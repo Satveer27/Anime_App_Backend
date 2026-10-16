@@ -1,8 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
 
+from app.config import settings
 from app.exceptions import AuthenticationError
 from app.security.exceptions import AlreadyLoggedInError, InvalidTokenError
 from app.security.models import RefreshToken
@@ -35,12 +36,23 @@ class JWTService:
             logger.warning("refresh_token_missing_fields")
             raise InvalidTokenError()
 
-        result = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
+        result = await self.refresh_token_repository.get_refresh_token_by_jti(UUID(jti))
         if result is None:
             logger.warning("refresh_token_not_found", jti=jti)
             raise AuthenticationError("Session invalid, please login again.")
 
-        if result.revoke:
+        row_count = await self.refresh_token_repository.revoke_refresh_token(UUID(jti))
+        if row_count != 1:
+            fresh = await self.refresh_token_repository.get_refresh_token_by_jti(UUID(jti))
+            grace = timedelta(seconds=settings.refresh_grace_seconds)
+            if (
+                fresh is not None
+                and fresh.revoked_at is not None
+                and datetime.now(UTC) - fresh.revoked_at <= grace
+            ):
+                logger.info("refresh_token_superseded", user_id=sub, jti=jti)
+                raise AuthenticationError("Token was just rotated, retry with the latest cookie.")
+
             logger.warning("refresh_token_reuse_detected", user_id=sub, jti=jti)
             await self.refresh_token_repository.delete_all_refresh_tokens_for_user(UUID(sub))
             await self.refresh_token_repository.commit()
@@ -48,9 +60,6 @@ class JWTService:
             logger.warning("all_sessions_revoked_due_to_reuse", user_id=sub)
 
             raise AuthenticationError("Session invalid, please login again.")
-
-        result.revoke = True
-        await self.refresh_token_repository.update_refresh_token(result)
 
         original_expiry = datetime.fromtimestamp(exp, tz=UTC)
         new_refresh_token = generate_refresh_token(result.user_id, original_expiry)
@@ -119,60 +128,82 @@ class JWTService:
 
         return RefreshResponse(refresh_token=new_refresh_token, access_token=new_access_token)
 
-    async def logout_service(self, refresh_token: str, access_token: str | None = None) -> None:
+    async def logout_service(
+        self, refresh_token: str | None, access_token: str | None = None
+    ) -> bool:
         logger.info("logout_attempt")
-        verified_token = decode_token(refresh_token, "refresh")
+
+        if access_token is not None:
+            try:
+                verified_access = decode_token(access_token, "access")
+                jti_access = verified_access.get("jti")
+                exp_access = verified_access.get("exp")
+                sub_access = verified_access.get("sub")
+                if jti_access is not None and exp_access is not None and sub_access is not None:
+                    await revoke_single_access_token(jti_access, exp_access, UUID(sub_access))
+            except InvalidTokenError:
+                pass
+
+        if refresh_token is None:
+            logger.info("logout_no_refresh_token")
+            return False
+
+        try:
+            verified_token = decode_token(refresh_token, "refresh")
+        except InvalidTokenError:
+            logger.info("logout_refresh_token_unusable")
+            return False
 
         sub = verified_token.get("sub")
         jti = verified_token.get("jti")
 
         if sub is None or jti is None:
             logger.warning("refresh_token_missing_fields")
-            raise InvalidTokenError()
+            return False
 
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
-            logger.warning("logout_token_invalid", user_id=sub, jti=jti)
-            raise AuthenticationError("Session invalid, please login again.")
+            logger.info("logout_user_already_logged_out", user_id=sub, jti=jti)
+            return False
 
         current_token.revoke = True
         await self.refresh_token_repository.update_refresh_token(current_token)
 
-        if access_token is not None:
-            try:
-                verfied_access_token = decode_token(access_token, "access")
-                jti_access = verfied_access_token.get("jti")
-                exp_access = verfied_access_token.get("exp")
-                if jti_access is not None and exp_access is not None:
-                    await revoke_single_access_token(jti_access, exp_access, UUID(sub))
-            except InvalidTokenError:
-                pass
-
         logger.info("user_logged_out", user_id=sub, jti=jti)
+        return True
 
-    async def logout_all_accounts(self, refresh_token: str) -> None:
+    async def logout_all_accounts(self, refresh_token: str | None) -> bool:
         logger.info("logout_all_attempt")
-        verified_token = decode_token(refresh_token, "refresh")
+
+        if refresh_token is None:
+            logger.info("logout_all_no_refresh_token")
+            return False
+
+        try:
+            verified_token = decode_token(refresh_token, "refresh")
+        except InvalidTokenError:
+            logger.info("logout_all_refresh_token_unusable")
+            return False
 
         sub = verified_token.get("sub")
         jti = verified_token.get("jti")
 
         if sub is None or jti is None:
             logger.warning("refresh_token_missing_fields")
-            raise InvalidTokenError()
+            return False
 
         current_token = await self.refresh_token_repository.get_refresh_token_by_jti(jti)
 
         if current_token is None or current_token.revoke:
-            logger.warning("logout_all_token_invalid", user_id=sub, jti=jti)
-            raise AuthenticationError("Session invalid, please login again.")
+            logger.info("logout_all_already_logged_out", user_id=sub, jti=jti)
+            return False
 
         user = await self.user_repository.get_user_by_id(UUID(sub))
 
         if user is None:
-            logger.warning("logout_all_user_invalid", user_id=sub, jti=jti)
-            raise AuthenticationError("You are not logged in, please login first.")
+            logger.info("logout_all_user_not_found", user_id=sub, jti=jti)
+            return False
 
         row_count = await self.refresh_token_repository.update_refresh_token_to_revoke(
             user_id=user.id
@@ -180,3 +211,5 @@ class JWTService:
 
         await revoke_access_to_all_tokens(UUID(sub))
         logger.info("all_sessions_logged_out", user_id=sub, session_count=row_count)
+
+        return True

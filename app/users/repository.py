@@ -99,3 +99,6 @@ class UserRepository:
 
     async def delete_user(self, user: User) -> None:
         await self.db.delete(user)
+
+    async def commit(self) -> None:
+        await self.db.commit()

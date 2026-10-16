@@ -67,6 +67,13 @@ class TooManyRequestsError(AppError):
     default_message = "Too many requests. Please try again later."
 
 
+class ServiceUnavailableError(AppError):
+    """A dependency we need (e.g. the task broker) is down; the caller can retry."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_message = "Service temporarily unavailable. Please try again shortly."
+
+
 # Handle exceptions
 async def handle_app_error(request: Request, exc: AppError):
     logger.warning(
