@@ -1,7 +1,49 @@
 import pytest
+import resend
 
 from app.users.tasks import tasks
 from app.users.utils import email as email_utils
+
+
+def resend_error(code, error_type):
+    return resend.exceptions.ResendError(
+        code=code, error_type=error_type, message="x", suggested_action=""
+    )
+
+
+# what the SDK raises when the network call itself fails
+TRANSIENT = RuntimeError("Request failed: timed out")
+
+
+class TestIsTransientEmailError:
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            TRANSIENT,
+            resend_error(500, "application_error"),
+            resend_error("503", "unknown"),
+            resend_error(429, "rate_limit_exceeded"),
+            resend_error(409, "concurrent_idempotent_requests"),
+        ],
+    )
+    def test_retryable(self, exc):
+        assert email_utils.is_transient_email_error(exc) is True
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            resend_error(422, "validation_error"),
+            resend_error(400, "validation_error"),
+            resend_error(403, "invalid_api_key"),
+            resend_error(429, "daily_quota_exceeded"),
+            resend_error(429, "monthly_quota_exceeded"),
+            resend_error(409, "invalid_idempotent_request"),
+            ValueError("bad"),
+            RuntimeError("something else"),
+        ],
+    )
+    def test_not_retryable(self, exc):
+        assert email_utils.is_transient_email_error(exc) is False
 
 
 class TestResendIdempotencyKey:
@@ -38,9 +80,7 @@ class TestResendIdempotencyKey:
 )
 class TestEmailTaskRetries:
     def test_retries_transient_failure_then_succeeds(self, mocker, task, sender):
-        send = mocker.patch.object(
-            tasks, sender, side_effect=[RuntimeError("boom"), RuntimeError("boom"), None]
-        )
+        send = mocker.patch.object(tasks, sender, side_effect=[TRANSIENT, TRANSIENT, None])
 
         result = task.apply(args=("user@example.com", "tok"))
 
@@ -48,7 +88,7 @@ class TestEmailTaskRetries:
         assert send.call_count == 3
 
     def test_gives_up_after_max_retries(self, mocker, task, sender):
-        send = mocker.patch.object(tasks, sender, side_effect=RuntimeError("down"))
+        send = mocker.patch.object(tasks, sender, side_effect=TRANSIENT)
 
         result = task.apply(args=("user@example.com", "tok"))
 
@@ -56,3 +96,11 @@ class TestEmailTaskRetries:
         # first attempt + max_retries retries
         assert send.call_count == 1 + task.max_retries
         assert task.max_retries == 5
+
+    def test_permanent_failure_is_not_retried(self, mocker, task, sender):
+        send = mocker.patch.object(tasks, sender, side_effect=resend_error(422, "validation_error"))
+
+        result = task.apply(args=("not-an-email", "tok"))
+
+        assert result.failed()
+        assert send.call_count == 1

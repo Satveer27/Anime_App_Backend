@@ -7,6 +7,22 @@ resend.api_key = settings.resend_api_key
 
 logger = structlog.get_logger()
 
+# Resend error types worth retrying even though they are 4xx
+_TRANSIENT_RESEND_ERROR_TYPES = {"rate_limit_exceeded", "concurrent_idempotent_requests"}
+
+
+def is_transient_email_error(exc: Exception) -> bool:
+    """True if retrying later can plausibly succeed (network, 5xx, rate limit); False for
+    permanent failures such as validation errors, bad API keys or exhausted quotas."""
+    if isinstance(exc, resend.exceptions.ResendError):
+        try:
+            status = int(exc.code)
+        except (TypeError, ValueError):
+            status = 0
+        return status >= 500 or exc.error_type in _TRANSIENT_RESEND_ERROR_TYPES
+    # the SDK wraps timeouts and connection errors in a RuntimeError("Request failed: ...")
+    return isinstance(exc, RuntimeError) and str(exc).startswith("Request failed")
+
 
 def send_email_verification(to_email: str, code: str) -> None:
     verification_link = f"{settings.frontend_url}/verify-email?token={code}"
