@@ -17,7 +17,7 @@ def send_email_verification(to_email: str, code: str) -> None:
         "html": f"<p>Click <a href='{verification_link}'>here</a> to verify your email. This link expires in 15 minutes.</p>",
     }
     try:
-        response = resend.Emails.send(params)
+        response = resend.Emails.send(params, {"idempotency_key": f"verify-email/{code}"})
     except Exception as e:
         logger.error("resend_send_failed", to_email=to_email, error=str(e))
         raise
@@ -33,7 +33,7 @@ def send_email_password_reset(to_email: str, code: str) -> None:
         "html": f"<p>Click <a href='{reset_link}'>here</a> to reset your password. This link expires in 15 minutes.</p>",
     }
     try:
-        response = resend.Emails.send(params)
+        response = resend.Emails.send(params, {"idempotency_key": f"password-reset/{code}"})
     except Exception as e:
         logger.error("resend_send_failed", to_email=to_email, error=str(e))
         raise
