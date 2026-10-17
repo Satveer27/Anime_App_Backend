@@ -111,6 +111,23 @@ Sizes are decoded response bodies, not the gzip size on the wire.
 
 **Images.** Image URLs are on `cdn.myanimelist.net`. Hotlinking from another origin was not tested.
 
+### Reviews on page 1 (re-analysed from the probe results, 17 Oct 2026)
+
+Computed from the git-ignored `probe_results_*.jsonl` (692 distinct anime, 6,034 reviews). These are measurements on the sample, which is 99% finished anime.
+
+| Measure | Value |
+|---|---|
+| Anime with no reviews | 264 of 692 (38.2%) |
+| Anime whose page 1 is full (20 reviews) | 241 of 692 (34.8%) |
+| Average reviews per anime | 8.5 (13.8 among anime that have any) |
+| Reviews with `is_spoiler = true` | 0 of 6,034 |
+| Reviews with `is_preliminary = true` | 0 of 6,034 |
+| Review text length | median 2,660 chars, p95 10,132, max 61,839 |
+| Most common years among the top 3 reviews of an anime | 2008 (158), 2014 (125), 2015 (99), 2007 (87), 2024 (73) |
+
+- No spoiler or preliminary review appears, so the server excludes them by default. No `spoilers` parameter was sent, and `spoilers=true` has not been tested. See ADR 0014.
+- The most helpful reviews skew old, because reactions accumulate over time. Page 1 says little about recent opinion.
+
 ### Projections from the probe
 
 These extrapolate the sample to the catalogue; they are estimates, not measurements.
