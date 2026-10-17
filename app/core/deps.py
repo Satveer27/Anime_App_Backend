@@ -18,11 +18,17 @@ security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
 
 
-def create_user_repository(db: AsyncSession = Depends(get_db)) -> UserRepository:
+# scope="function": get_db's commit runs before the response is sent, so a failed commit becomes an
+# error response instead of a 2xx for data that was never saved (the default runs it afterwards).
+def create_user_repository(
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> UserRepository:
     return UserRepository(db)
 
 
-def create_refresh_token_repository(db: AsyncSession = Depends(get_db)) -> RefreshTokenRepository:
+def create_refresh_token_repository(
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> RefreshTokenRepository:
     return RefreshTokenRepository(db)
 
 

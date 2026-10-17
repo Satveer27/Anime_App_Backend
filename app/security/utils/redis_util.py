@@ -35,6 +35,8 @@ async def revoke_access_to_all_tokens(user_id: UUID) -> None:
 
     for jti in active_jtis:
         score = await redis_server.zscore(f"user_tokens:{user_id}", jti)
+        if score is None:  # expired between the range query and now
+            continue
         ttl = max(int(score - now), 0)
         await redis_server.setex(f"revoked:{jti}", ttl, "1")
         await redis_server.zrem(f"user_tokens:{user_id}", jti)

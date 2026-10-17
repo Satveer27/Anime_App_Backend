@@ -138,7 +138,7 @@ jobs:
       - name: Wait and check health endpoint
         run: |
           for i in $(seq 1 10); do
-            if curl --fail http://localhost:8000/health; then
+            if curl --fail http://localhost:8000/api/v1/health; then
               echo "App is healthy"
               exit 0
             fi

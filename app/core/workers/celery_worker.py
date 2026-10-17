@@ -21,6 +21,17 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     broker_connection_retry_on_startup=True,
+    # Publishing from the API must fail fast when the broker is down: ~2s per attempt, two retry.
+    broker_connection_timeout=2,
+    broker_transport_options={"socket_connect_timeout": 2, "socket_timeout": 2},
+    task_publish_retry=True,
+    task_publish_retry_policy={
+        "max_retries": 2,
+        "interval_start": 0,
+        "interval_step": 0.2,
+        "interval_max": 0.2,
+    },
+    task_ignore_result=True,
     result_expires=3600,  # 1 hour
     worker_concurrency=4,  # Number of worker processes
     beat_schedule={

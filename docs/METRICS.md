@@ -171,3 +171,18 @@ The raw size range comes from the sample: 41.5 KB per anime is the average of al
 ### Reproduce
 
 The probe notebook is `analysis/tenrai_probe/jikan_ingestion.ipynb`. It writes `probe_metrics_*.json` (one row per request) and `probe_results_*.jsonl` (one line per anime) next to itself; both are git-ignored. The analysis cells read those files and generate the tables above. The raw files are not committed because they hold third-party API data.
+
+## 2. Task enqueue when the Celery broker is down, 17 Oct 2026
+
+How long `enqueue()` (a `.delay()` in a worker thread) takes to give up with a 503 when Redis is unreachable. Measured on the developer's Windows machine with no Redis running, three runs per case, `uv run python` against the real Celery app. Broker settings: `broker_connection_timeout=2`, socket connect/read timeouts 2s, publish retry `max_retries=2` (interval 0 to 0.2s).
+
+| Case | Before `task_ignore_result=True` | After |
+|---|---|---|
+| Broker port closed (127.0.0.1:1) | Did not return in over 180s (killed) | 503 after 2.2s (2.23, 2.23, 2.20) |
+| Broker host unroutable (10.255.255.1) | Not measured separately | 503 after 2.2s (2.20, 2.21, 2.22) |
+
+**Cause of the hang:** every `.delay()` made the result backend subscribe to the result channel. With Redis down, the backend's own reconnect loop (long default retry policy) blocked the call, so the publish retry policy never mattered. The app never reads task results, so results are now ignored.
+
+**Why 2.2s and not three attempts:** kombu runs the publish retry with an overall time budget (`timeout=2`, from `broker_connection_timeout`). In both cases the first attempt used the whole budget (2.01s), so kombu's `retry_over_time` raised without sleeping or retrying (it checks `time() > end` after a failed attempt). The remaining ~0.2s is overhead outside the attempt (thread start, connection setup); it was not investigated. `max_retries=2` only applies when attempts fail faster than the 2s budget. A closed port takes about 2s to fail on Windows; on Linux it should be refused immediately, which would allow the retries, but that was not measured.
+
+Reproduce: point `REDIS_BROKER_URL` at the target and time `await enqueue(send_email_verification_task, "a@example.com", "code")`.

@@ -14,7 +14,7 @@ from app.exceptions import (
 )
 from app.security.utils.password import check_password
 from app.users.exceptions import UserAlreadyExistsError
-from app.users.schemas import GetAllUserSchema, UserUpdateSchema
+from app.users.schemas import GetAllUserSchema, UserCreateSchema, UserUpdateSchema
 
 
 class TestCreateUserService:
@@ -569,12 +569,15 @@ class TestDeleteCurrentUserService:
 
         mock_user_repository.delete_user.assert_not_called()
 
-    async def test_self_delete_deletes_commits_then_revokes_redis(
-        self, user_service, mock_user_repository, mocker, make_user
+    async def test_self_delete_revokes_tokens_before_deleting_account(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
     ):
         user = make_user(is_admin=False)
         mock_user_repository.get_user_by_id.return_value = user
         events: list[str] = []
+        mock_token_repository.delete_all_refresh_tokens_for_user.side_effect = lambda uid: (
+            events.append("sessions")
+        )
         mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
         mock_user_repository.commit.side_effect = lambda: events.append("commit")
         mocker.patch(
@@ -584,20 +587,26 @@ class TestDeleteCurrentUserService:
 
         await user_service.delete_current_user_service(user.id)
 
-        assert events == ["delete", "commit", "revoke"]
+        assert events == ["revoke", "sessions", "delete", "commit"]
 
-    async def test_self_delete_commit_failure_does_not_revoke_redis(
-        self, user_service, mock_user_repository, mocker, make_user
+    async def test_self_delete_redis_failure_deletes_nothing(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
     ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
         user = make_user(is_admin=False)
         mock_user_repository.get_user_by_id.return_value = user
-        mock_user_repository.commit.side_effect = RuntimeError("db down")
-        revoke = mocker.patch("app.users.service.revoke_access_to_all_tokens")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=RedisConnectionError("boom"),
+        )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RedisConnectionError):
             await user_service.delete_current_user_service(user.id)
 
-        revoke.assert_not_called()
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_not_called()
+        mock_user_repository.delete_user.assert_not_called()
+        mock_user_repository.commit.assert_not_called()
 
 
 class TestUpdateUserPasswordService:
@@ -830,12 +839,15 @@ class TestDeleteUserByIdService:
         with pytest.raises(ResourceDoesNotExistError):
             await user_service.delete_user_by_id_service(uuid4(), admin_id=uuid4())
 
-    async def test_admin_delete_deletes_commits_then_revokes_redis(
-        self, user_service, mock_user_repository, mocker, make_user
+    async def test_admin_delete_revokes_tokens_before_deleting_account(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
     ):
         user = make_user(is_admin=False)
         mock_user_repository.get_user_by_id.return_value = user
         events: list[str] = []
+        mock_token_repository.delete_all_refresh_tokens_for_user.side_effect = lambda uid: (
+            events.append("sessions")
+        )
         mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
         mock_user_repository.commit.side_effect = lambda: events.append("commit")
         mocker.patch(
@@ -845,20 +857,26 @@ class TestDeleteUserByIdService:
 
         await user_service.delete_user_by_id_service(user.id, admin_id=uuid4())
 
-        assert events == ["delete", "commit", "revoke"]
+        assert events == ["revoke", "sessions", "delete", "commit"]
 
-    async def test_admin_delete_commit_failure_does_not_revoke_redis(
-        self, user_service, mock_user_repository, mocker, make_user
+    async def test_admin_delete_redis_failure_deletes_nothing(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
     ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
         user = make_user(is_admin=False)
         mock_user_repository.get_user_by_id.return_value = user
-        mock_user_repository.commit.side_effect = RuntimeError("db down")
-        revoke = mocker.patch("app.users.service.revoke_access_to_all_tokens")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=RedisConnectionError("boom"),
+        )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RedisConnectionError):
             await user_service.delete_user_by_id_service(user.id, admin_id=uuid4())
 
-        revoke.assert_not_called()
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_not_called()
+        mock_user_repository.delete_user.assert_not_called()
+        mock_user_repository.commit.assert_not_called()
 
 
 class TestDeleteMultipleUsersByIdsService:
@@ -898,8 +916,8 @@ class TestDeleteMultipleUsersByIdsService:
         assert result.skipped_admins == [admin_user.id]
         mock_user_repository.delete_user.assert_called_once_with(deletable_user)
 
-    async def test_each_delete_is_committed_before_its_redis_revoke(
-        self, user_service, mock_user_repository, mocker, make_user
+    async def test_each_user_has_tokens_revoked_before_being_deleted(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
     ):
         first, second = make_user(is_admin=False), make_user(is_admin=False)
         users = {first.id: first, second.id: second}
@@ -909,6 +927,9 @@ class TestDeleteMultipleUsersByIdsService:
 
         mock_user_repository.get_user_by_id.side_effect = get_user_by_id
         events: list[str] = []
+        mock_token_repository.delete_all_refresh_tokens_for_user.side_effect = lambda uid: (
+            events.append("sessions")
+        )
         mock_user_repository.delete_user.side_effect = lambda u: events.append("delete")
         mock_user_repository.commit.side_effect = lambda: events.append("commit")
         mocker.patch(
@@ -920,4 +941,102 @@ class TestDeleteMultipleUsersByIdsService:
             [first.id, second.id], admin_id=uuid4()
         )
 
-        assert events == ["delete", "commit", "revoke"] * 2
+        assert events == ["revoke", "sessions", "delete", "commit"] * 2
+
+
+class TestBulkDeleteRedisOutage:
+    async def test_stops_at_first_redis_failure_and_reports_the_rest(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        first, second, third = (make_user(is_admin=False) for _ in range(3))
+        users = {u.id: u for u in (first, second, third)}
+
+        async def get_user_by_id(user_id):
+            return users[user_id]
+
+        mock_user_repository.get_user_by_id.side_effect = get_user_by_id
+        revoke = mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=[None, RedisConnectionError("boom")],
+        )
+
+        result = await user_service.delete_multiple_users_by_ids_service(
+            [first.id, second.id, third.id], admin_id=uuid4()
+        )
+
+        assert result.deleted == [first.id]
+        assert result.not_processed == [second.id, third.id]
+        assert revoke.call_count == 2  # did not keep hammering a down Redis
+        mock_user_repository.delete_user.assert_called_once_with(first)
+
+
+class TestEnqueueFailureOnCommittedPaths:
+    async def test_signup_returns_503_when_broker_is_down(
+        self, user_service, mock_user_repository, mock_celery_tasks
+    ):
+        from app.exceptions import ServiceUnavailableError
+
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.side_effect = lambda u: u
+        mock_celery_tasks["verification"].side_effect = OperationalError("broker down")
+
+        with pytest.raises(ServiceUnavailableError):
+            await user_service.create_user_service(
+                UserCreateSchema(
+                    email="new@example.com", username="newuser", password="Password123!"
+                )
+            )
+
+
+class TestEmailRequestFailureHandling:
+    async def test_cooldown_release_failure_still_gives_app_error(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        user = make_user(is_verified=False)
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = None
+        mock_celery_tasks["verification"].side_effect = OperationalError("broker down")
+        mock_redis.delete.side_effect = RedisConnectionError("boom")
+
+        with pytest.raises(ServiceUnavailableError, match="5 minutes"):
+            await user_service.resend_email_verification_service(user.email)
+
+    async def test_redis_failure_while_issuing_token_releases_cooldown(
+        self, user_service, mock_user_repository, mock_redis, mock_celery_tasks, make_user
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        user = make_user()
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.set.return_value = True
+        mock_redis.get.return_value = None
+        mock_redis.setex.side_effect = RedisConnectionError("boom")
+
+        with pytest.raises(ServiceUnavailableError):
+            await user_service.forgot_password_service(user.email)
+
+        mock_redis.delete.assert_called_once_with(f"forgot_password_cooldown:{user.id}")
+        mock_celery_tasks["password_reset"].assert_not_called()
+
+    async def test_signup_redis_failure_says_account_was_created(
+        self, user_service, mock_user_repository, mock_redis
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.side_effect = lambda u: u
+        mock_redis.setex.side_effect = RedisConnectionError("boom")
+
+        with pytest.raises(ServiceUnavailableError, match="account was created"):
+            await user_service.create_user_service(
+                UserCreateSchema(
+                    email="new@example.com", username="newuser", password="Password123!"
+                )
+            )
+
+        mock_user_repository.commit.assert_called_once()

@@ -3,6 +3,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
 from app.exceptions import AuthenticationError
@@ -357,3 +358,74 @@ class TestLogoutAllAccounts:
         assert result is False
         mock_token_repository.update_refresh_token_to_revoke.assert_not_called()
         mock_redis.zrangebyscore.assert_not_called()
+
+
+class TestRedisOutageFallbacks:
+    async def test_logout_still_revokes_refresh_token_when_redis_is_down(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        raw_access_token = await generate_access_token(user_id)
+        decoded = decode_token(raw_refresh_token, "refresh")
+        current_token = make_refresh_token(user_id=user_id, jti=UUID(decoded["jti"]), revoke=False)
+        mock_token_repository.get_refresh_token_by_jti.return_value = current_token
+        mock_redis.setex.side_effect = RedisConnectionError("boom")
+
+        result = await jwt_service.logout_service(raw_refresh_token, raw_access_token)
+
+        assert result is True
+        assert current_token.revoke is True
+        mock_token_repository.update_refresh_token.assert_called_once_with(current_token)
+
+    async def test_reuse_detection_still_returns_401_when_redis_is_down(
+        self, jwt_service, mock_token_repository, mock_redis, make_refresh_token
+    ):
+        user_id = uuid4()
+        raw_refresh_token = generate_refresh_token(user_id)
+        decoded = decode_token(raw_refresh_token, "refresh")
+        mock_token_repository.get_refresh_token_by_jti.return_value = make_refresh_token(
+            user_id=user_id,
+            jti=UUID(decoded["jti"]),
+            revoke=True,
+            revoked_at=datetime.now(UTC) - timedelta(seconds=settings.refresh_grace_seconds + 60),
+        )
+        mock_token_repository.revoke_refresh_token.return_value = 0
+        mock_redis.zremrangebyscore.side_effect = RedisConnectionError("boom")
+
+        with pytest.raises(AuthenticationError):
+            await jwt_service.refresh_access_token_service(raw_refresh_token)
+
+        mock_token_repository.delete_all_refresh_tokens_for_user.assert_called_once_with(user_id)
+        mock_token_repository.commit.assert_called_once()
+
+    async def test_login_surfaces_redis_error_for_503_mapping(
+        self, jwt_service, mock_user_repository, mock_redis, make_user
+    ):
+        user = make_user(password="Password123!")
+        mock_user_repository.get_user_by_email.return_value = user
+        mock_redis.zadd.side_effect = RedisConnectionError("boom")
+
+        with pytest.raises(RedisConnectionError):
+            await jwt_service.login_service(user.email, "Password123!")
+
+
+class TestPasswordCheckOffEventLoop:
+    async def test_login_checks_password_in_a_worker_thread(
+        self, jwt_service, mock_user_repository, mocker, make_user
+    ):
+        import threading
+
+        seen: list[int] = []
+
+        def fake_check(plain, hashed):
+            seen.append(threading.get_ident())
+            return True
+
+        mocker.patch("app.security.service.check_password", side_effect=fake_check)
+        user = make_user()
+        mock_user_repository.get_user_by_email.return_value = user
+
+        await jwt_service.login_service(user.email, "whatever")
+
+        assert seen and seen[0] != threading.get_ident()

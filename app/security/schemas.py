@@ -1,5 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 
+from app.schemas import Password
+
 
 class RefreshResponse(BaseModel):
     refresh_token: str = Field(..., description="The newly generated refresh token")
@@ -8,7 +10,7 @@ class RefreshResponse(BaseModel):
 
 class UserRequestLogin(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
-    password: str = Field(..., max_length=60, description="The password of the user")
+    password: Password = Field(..., max_length=60, description="The password of the user")
 
 
 class TokenResponse(BaseModel):

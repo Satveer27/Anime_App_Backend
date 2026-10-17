@@ -14,7 +14,13 @@ logger = structlog.get_logger()
 class EmailTask(Task):
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         # only reached once all retries are exhausted
-        logger.error("email_task_failed_permanently", task=self.name, error=str(exc))
+        logger.error(
+            "email_task_failed_permanently",
+            task=self.name,
+            task_id=task_id,
+            to_email=args[0] if args else None,
+            error=str(exc),
+        )
 
 
 class TransientEmailError(Exception):
