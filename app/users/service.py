@@ -1,4 +1,6 @@
+import asyncio
 import secrets
+from typing import NoReturn
 from uuid import UUID
 
 import structlog
@@ -39,6 +41,27 @@ class UserService:
         self.user_repository = user_repository
         self.token_repository = token_repository
 
+    async def _fail_email_request(self, cooldown_key: str, user_id: UUID) -> NoReturn:
+        """Nothing was sent: free the cooldown so they can retry now, and always answer with an
+        app-level 503 (never a raw Redis error), even if the cooldown cannot be freed."""
+        try:
+            await redis_server.delete(cooldown_key)
+        except RedisError:
+            logger.warning("cooldown_release_failed", user_id=str(user_id))
+            raise ServiceUnavailableError(
+                "Could not send the email. Please wait 5 minutes and try again."
+            ) from None
+        raise ServiceUnavailableError("Could not send the email, please try again.")
+
+    async def _delete_user_and_sessions(self, user: User) -> None:
+        """Access tokens first, then refresh tokens, then the account. If Redis is down this fails
+        before anything is deleted, instead of deleting the account and leaving its access tokens
+        usable for the rest of their lifetime."""
+        await revoke_access_to_all_tokens(user.id)
+        await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
+        await self.user_repository.delete_user(user)
+        await self.user_repository.commit()
+
     async def create_user_service(self, request: UserCreateSchema) -> UserResponseSchema:
         logger.info("signup_attempt", email=request.email)
         exists = await self.user_repository.get_user_by_email(request.email)
@@ -46,7 +69,7 @@ class UserService:
             logger.warning("signup_email_already_exists", email=request.email)
             raise UserAlreadyExistsError()
 
-        hashed_password = hash_password(request.password)
+        hashed_password = await asyncio.to_thread(hash_password, request.password)
 
         token = secrets.token_urlsafe(32)
 
@@ -65,11 +88,23 @@ class UserService:
         # persist first: Redis tokens and the queued email must never outlive a rolled-back user
         await self.user_repository.commit()
 
-        await redis_server.setex(f"email_verification:{token}", 900, str(result.id))
-        await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
         logger.info("user_signed_up", user_id=str(result.id))
 
-        await enqueue(send_email_verification_task, result.email, token)
+        try:
+            await redis_server.setex(f"email_verification:{token}", 900, str(result.id))
+            await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
+            await enqueue(send_email_verification_task, result.email, token)
+        except (RedisError, ServiceUnavailableError) as exc:
+            # The account exists, so say so: a retried signup would only fail with "already exists"
+            logger.error(
+                "signup_verification_email_not_sent",
+                user_id=str(result.id),
+                error_type=type(exc).__name__,
+            )
+            raise ServiceUnavailableError(
+                "Your account was created, but we could not send the verification email. "
+                "Please request a new verification email in a few minutes."
+            ) from None
 
         return UserResponseSchema.model_validate(result)
 
@@ -115,20 +150,17 @@ class UserService:
             logger.warning("resend_verification_rate_limited", user_id=str(user.id))
             raise TooManyRequestsError("Please wait before requesting another verification email.")
 
-        previous_token = await redis_server.get(f"email_verification_user:{user.id}")
-        if previous_token:
-            await redis_server.delete(f"email_verification:{previous_token}")
-
-        token = secrets.token_urlsafe(32)
-        await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
-        await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
-
         try:
+            previous_token = await redis_server.get(f"email_verification_user:{user.id}")
+            if previous_token:
+                await redis_server.delete(f"email_verification:{previous_token}")
+
+            token = secrets.token_urlsafe(32)
+            await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
+            await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
             await enqueue(send_email_verification_task, user.email, token)
-        except ServiceUnavailableError:
-            # nothing was queued, so release the cooldown instead of making them wait 5 minutes
-            await redis_server.delete(cooldown_key)
-            raise
+        except (RedisError, ServiceUnavailableError):
+            await self._fail_email_request(cooldown_key, user.id)
 
         logger.info("resend_email_verification_sent", user_id=str(user.id))
         return SuccessMessage(
@@ -152,18 +184,17 @@ class UserService:
                 "Please wait before requesting another password reset email."
             )
 
-        previous_token = await redis_server.get(f"password_reset_user:{user.id}")
-        if previous_token:
-            await redis_server.delete(f"password_reset:{previous_token}")
-
-        token = secrets.token_urlsafe(32)
-        await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
-        await redis_server.setex(f"password_reset_user:{user.id}", 900, token)
         try:
+            previous_token = await redis_server.get(f"password_reset_user:{user.id}")
+            if previous_token:
+                await redis_server.delete(f"password_reset:{previous_token}")
+
+            token = secrets.token_urlsafe(32)
+            await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
+            await redis_server.setex(f"password_reset_user:{user.id}", 900, token)
             await enqueue(send_email_password_reset_task, user.email, token)
-        except ServiceUnavailableError:
-            await redis_server.delete(cooldown_key)
-            raise
+        except (RedisError, ServiceUnavailableError):
+            await self._fail_email_request(cooldown_key, user.id)
 
         logger.info("forgot_password_requested", user_id=str(user.id))
         return SuccessMessage(
@@ -185,7 +216,7 @@ class UserService:
             logger.warning("password_reset_user_not_found", user_id=str(user_id))
             raise ResourceDoesNotExistError()
 
-        hashed_password = hash_password(new_password)
+        hashed_password = await asyncio.to_thread(hash_password, new_password)
         user.password = hashed_password
         await self.user_repository.update_user(user)
         await redis_server.delete(f"password_reset_user:{user_id}")
@@ -274,9 +305,7 @@ class UserService:
             logger.warning("admin_self_delete_blocked", user_id=str(user_id))
             raise ForbiddenError("Admins cannot delete their own account.")
 
-        await self.user_repository.delete_user(user)
-        await self.user_repository.commit()
-        await revoke_access_to_all_tokens(user.id)
+        await self._delete_user_and_sessions(user)
 
         logger.info("user_deleted_successfully", user_id=str(user_id))
         return SuccessMessage(success_message="User deleted successfully.")
@@ -291,11 +320,11 @@ class UserService:
             logger.warning("update_password_user_not_found", user_id=str(user_id))
             raise ResourceDoesNotExistError()
 
-        if not check_password(old_password, user.password):
+        if not await asyncio.to_thread(check_password, old_password, user.password):
             logger.warning("update_password_incorrect_old_password", user_id=str(user_id))
             raise AuthenticationError("The old password is incorrect.")
 
-        hashed_password = hash_password(new_password)
+        hashed_password = await asyncio.to_thread(hash_password, new_password)
         user.password = hashed_password
         await self.user_repository.update_user(user)
 
@@ -425,9 +454,7 @@ class UserService:
             )
             raise ForbiddenError("You cannot delete another admins account.")
 
-        await self.user_repository.delete_user(user)
-        await self.user_repository.commit()
-        await revoke_access_to_all_tokens(user_id)
+        await self._delete_user_and_sessions(user)
 
         logger.info("admin_deleted_user", admin_id=str(admin_id), user_id=str(user_id))
         return SuccessMessage(success_message="User deleted successfully.")
@@ -444,9 +471,9 @@ class UserService:
         not_found_ids = []
         deleted_ids = []
         skipped_admin_ids = []
-        revoke_failed_ids = []
+        not_processed_ids: list[str] = []
 
-        for user_id in user_ids:
+        for index, user_id in enumerate(user_ids):
             user = await self.user_repository.get_user_by_id(user_id)
             if not user:
                 logger.warning(
@@ -461,20 +488,19 @@ class UserService:
                 skipped_admin_ids.append(str(user_id))
 
             else:
-                await self.user_repository.delete_user(user)
-                await self.user_repository.commit()
-                deleted_ids.append(str(user_id))
                 try:
-                    await revoke_access_to_all_tokens(user_id)
+                    await self._delete_user_and_sessions(user)
                 except RedisError as exc:
-                    # keep going so earlier commits are still reported to the caller
+                    # Redis is down: stop instead of timing out once per remaining user, and report
+                    # what was not processed so the caller can retry just those.
                     logger.error(
-                        "bulk_delete_revoke_failed",
+                        "bulk_delete_stopped_redis_unavailable",
                         admin_id=str(admin_id),
-                        user_id=str(user_id),
                         error_type=type(exc).__name__,
                     )
-                    revoke_failed_ids.append(str(user_id))
+                    not_processed_ids = [str(uid) for uid in user_ids[index:]]
+                    break
+                deleted_ids.append(str(user_id))
 
         logger.info(
             "bulk_users_deleted",
@@ -482,11 +508,11 @@ class UserService:
             deleted_count=len(deleted_ids),
             not_found_count=len(not_found_ids),
             skipped_admin_count=len(skipped_admin_ids),
-            revoke_failed_count=len(revoke_failed_ids),
+            not_processed_count=len(not_processed_ids),
         )
         return BulkDeleteResult(
             deleted=deleted_ids,
             not_found=not_found_ids,
             skipped_admins=skipped_admin_ids,
-            revoke_failed=revoke_failed_ids,
+            not_processed=not_processed_ids,
         )

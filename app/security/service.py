@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -108,7 +109,7 @@ class JWTService:
                 pass
 
         user = await self.user_repository.get_user_by_email(email)
-        if user is None or not check_password(password, user.password):
+        if user is None or not await asyncio.to_thread(check_password, password, user.password):
             logger.warning("login_failed", email=email)
             raise AuthenticationError("Incorrect password and username")
 

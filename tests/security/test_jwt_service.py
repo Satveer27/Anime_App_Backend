@@ -408,3 +408,24 @@ class TestRedisOutageFallbacks:
 
         with pytest.raises(RedisConnectionError):
             await jwt_service.login_service(user.email, "Password123!")
+
+
+class TestPasswordCheckOffEventLoop:
+    async def test_login_checks_password_in_a_worker_thread(
+        self, jwt_service, mock_user_repository, mocker, make_user
+    ):
+        import threading
+
+        seen: list[int] = []
+
+        def fake_check(plain, hashed):
+            seen.append(threading.get_ident())
+            return True
+
+        mocker.patch("app.security.service.check_password", side_effect=fake_check)
+        user = make_user()
+        mock_user_repository.get_user_by_email.return_value = user
+
+        await jwt_service.login_service(user.email, "whatever")
+
+        assert seen and seen[0] != threading.get_ident()

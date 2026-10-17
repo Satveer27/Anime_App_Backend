@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
@@ -74,6 +75,10 @@ app.add_exception_handler(RequestValidationError, handle_validation_error)
 app.add_exception_handler(StarletteHTTPException, handle_http_exception)
 app.add_exception_handler(RedisError, handle_dependency_unavailable)
 app.add_exception_handler(DBAPIError, handle_dependency_unavailable)
+# asyncpg raises a bare ConnectionRefusedError (not a DBAPIError) when Postgres is unreachable
+app.add_exception_handler(ConnectionError, handle_dependency_unavailable)
+app.add_exception_handler(TimeoutError, handle_dependency_unavailable)
+app.add_exception_handler(SQLAlchemyTimeoutError, handle_dependency_unavailable)
 app.add_exception_handler(Exception, handle_internal_exception)
 
 

@@ -4,6 +4,7 @@ import pytest
 from fastapi import APIRouter
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.main import app
 from app.security.utils.redis_util import is_token_revoked
@@ -21,6 +22,22 @@ async def _db_down():
     raise OperationalError("SELECT 1", {}, Exception("connection lost"))
 
 
+@router.get("/_test/db-refused")
+async def _db_refused():
+    # what asyncpg raises when Postgres is unreachable: not a DBAPIError
+    raise ConnectionRefusedError("connection refused")
+
+
+@router.get("/_test/db-pool-exhausted")
+async def _db_pool_exhausted():
+    raise SQLAlchemyTimeoutError("QueuePool limit reached")
+
+
+@router.get("/_test/timeout")
+async def _timeout():
+    raise TimeoutError("timed out")
+
+
 @router.get("/_test/bug")
 async def _bug():
     raise ValueError("a real bug")
@@ -29,7 +46,16 @@ async def _bug():
 app.include_router(router)
 
 
-@pytest.mark.parametrize("path", ["/_test/redis-down", "/_test/db-down"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/_test/redis-down",
+        "/_test/db-down",
+        "/_test/db-refused",
+        "/_test/db-pool-exhausted",
+        "/_test/timeout",
+    ],
+)
 def test_dependency_errors_map_to_503_with_retry_after(client, path):
     response = client.get(path)
 
