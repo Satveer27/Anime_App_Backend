@@ -3,12 +3,23 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-from app.config import settings
-from app.core.database.database import Base
 
 # Imported only so each model registers its table on Base.metadata; autogenerate and
 # `alembic check` see an empty schema (and want to drop every table) without them.
 # Every new models.py must be imported here.
+from app.catalogue.models import (  # noqa: F401
+    Anime,
+    AnimeRelation,
+    AnimeStatisticsMal,
+    AnimeStudio,
+    AnimeTag,
+    Episode,
+    Review,
+    Studio,
+    Tag,
+)
+from app.config import settings
+from app.core.database.database import Base
 from app.ingestion.models import IngestionTask, RawTenrai  # noqa: F401
 from app.security.models import RefreshToken  # noqa: F401
 from app.users.models import User  # noqa: F401
