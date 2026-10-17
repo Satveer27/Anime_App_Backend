@@ -115,15 +115,16 @@ class AnimeStatisticsMal(Base):
 
 
 class AnimeRelation(Base):
-    """A directed edge to another anime or manga. No FK on the target: it may not be ingested."""
+    """A directed anime-to-anime edge. No FK on the target: it may not be ingested.
+
+    Manga relations are not stored (they stay in raw_tenrai), so the id needs no type.
+    """
 
     __tablename__ = "anime_relation"
 
     anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), primary_key=True)
     # MAL's relation name (Sequel, Prequel, Side Story, Adaptation, ...); source-controlled, no CHECK.
     relation = Column(Text, primary_key=True)
-    # 'anime' or 'manga': the two id spaces overlap, so the type is part of the key.
-    related_type = Column(Text, primary_key=True)
     related_mal_id = Column(Integer, primary_key=True, autoincrement=False)
 
 
