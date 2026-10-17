@@ -1,4 +1,5 @@
 from sqlalchemy import CheckConstraint, Column, DateTime, Enum, Integer, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database.database import Base
 from app.ingestion.enums.resource_enum import Resource
@@ -40,3 +41,21 @@ class IngestionTask(Base):
     updated_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class RawTenrai(Base):
+    """A Tenrai response stored untouched, one row per (mal_id, resource)."""
+
+    __tablename__ = "raw_tenrai"
+    __table_args__ = (
+        CheckConstraint(_in_list("resource", Resource), name="ck_raw_tenrai_resource"),
+    )
+
+    mal_id = Column(Integer, primary_key=True)
+    resource = Column(
+        Enum(Resource, native_enum=False, create_constraint=False, values_callable=_enum_values),
+        primary_key=True,
+    )
+    # Multi-page Resources (episodes) store every page as a list, written once after the last.
+    payload = Column(JSONB, nullable=False)
+    fetched_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
