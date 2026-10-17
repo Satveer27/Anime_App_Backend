@@ -2,11 +2,11 @@ import secrets
 from uuid import UUID
 
 import structlog
-from kombu.exceptions import OperationalError
 from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError
 
 from app.core.redis.redis_client import redis_server
+from app.core.workers.enqueue import enqueue
 from app.exceptions import (
     AuthenticationError,
     ForbiddenError,
@@ -69,7 +69,7 @@ class UserService:
         await redis_server.setex(f"email_verification_user:{result.id}", 900, token)
         logger.info("user_signed_up", user_id=str(result.id))
 
-        send_email_verification_task.delay(result.email, token)
+        await enqueue(send_email_verification_task, result.email, token)
 
         return UserResponseSchema.model_validate(result)
 
@@ -124,12 +124,11 @@ class UserService:
         await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
 
         try:
-            send_email_verification_task.delay(user.email, token)
-        except OperationalError:
+            await enqueue(send_email_verification_task, user.email, token)
+        except ServiceUnavailableError:
             # nothing was queued, so release the cooldown instead of making them wait 5 minutes
-            logger.error("verification_email_enqueue_failed", user_id=str(user.id))
             await redis_server.delete(cooldown_key)
-            raise ServiceUnavailableError("Could not send the email, please try again.") from None
+            raise
 
         logger.info("resend_email_verification_sent", user_id=str(user.id))
         return SuccessMessage(
@@ -161,11 +160,10 @@ class UserService:
         await redis_server.setex(f"password_reset:{token}", 900, str(user.id))
         await redis_server.setex(f"password_reset_user:{user.id}", 900, token)
         try:
-            send_email_password_reset_task.delay(user.email, token)
-        except OperationalError:
-            logger.error("password_reset_email_enqueue_failed", user_id=str(user.id))
+            await enqueue(send_email_password_reset_task, user.email, token)
+        except ServiceUnavailableError:
             await redis_server.delete(cooldown_key)
-            raise ServiceUnavailableError("Could not send the email, please try again.") from None
+            raise
 
         logger.info("forgot_password_requested", user_id=str(user.id))
         return SuccessMessage(
@@ -239,7 +237,7 @@ class UserService:
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
         await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
 
-        send_email_verification_task.delay(user.email, token)
+        await enqueue(send_email_verification_task, user.email, token)
 
         logger.info("email_change_successful", user_id=str(user.id))
         return SuccessMessage(
@@ -400,7 +398,7 @@ class UserService:
         await redis_server.setex(f"email_verification:{token}", 900, str(user.id))
         await redis_server.setex(f"email_verification_user:{user.id}", 900, token)
 
-        send_email_verification_task.delay(user.email, token)
+        await enqueue(send_email_verification_task, user.email, token)
 
         logger.info("admin_updated_user_email", admin_id=str(admin_id), user_id=str(result.id))
         return UserResponseSchema.model_validate(result)

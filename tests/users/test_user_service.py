@@ -14,7 +14,7 @@ from app.exceptions import (
 )
 from app.security.utils.password import check_password
 from app.users.exceptions import UserAlreadyExistsError
-from app.users.schemas import GetAllUserSchema, UserUpdateSchema
+from app.users.schemas import GetAllUserSchema, UserCreateSchema, UserUpdateSchema
 
 
 class TestCreateUserService:
@@ -948,3 +948,21 @@ class TestBulkDeleteRedisOutage:
         assert result.deleted == [first.id, second.id]
         assert result.revoke_failed == [first.id]
         assert mock_user_repository.commit.call_count == 2
+
+
+class TestEnqueueFailureOnCommittedPaths:
+    async def test_signup_returns_503_when_broker_is_down(
+        self, user_service, mock_user_repository, mock_celery_tasks
+    ):
+        from app.exceptions import ServiceUnavailableError
+
+        mock_user_repository.get_user_by_email.return_value = None
+        mock_user_repository.create_user.side_effect = lambda u: u
+        mock_celery_tasks["verification"].side_effect = OperationalError("broker down")
+
+        with pytest.raises(ServiceUnavailableError):
+            await user_service.create_user_service(
+                UserCreateSchema(
+                    email="new@example.com", username="newuser", password="Password123!"
+                )
+            )
