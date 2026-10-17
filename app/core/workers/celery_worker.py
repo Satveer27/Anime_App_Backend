@@ -31,6 +31,7 @@ celery_app.conf.update(
         "interval_step": 0.2,
         "interval_max": 0.2,
     },
+    task_ignore_result=True,
     result_expires=3600,  # 1 hour
     worker_concurrency=4,  # Number of worker processes
     beat_schedule={

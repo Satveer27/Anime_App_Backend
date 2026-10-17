@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -25,25 +26,59 @@ from app.router import main_router
 logger = structlog.get_logger()
 
 
+STARTUP_ATTEMPTS = 3  # first try plus 2 retries
+STARTUP_RETRY_DELAY_S = 2
+
+
+async def _check_dependencies() -> None:
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    await redis_server.ping()
+
+
+async def _wait_for_dependencies() -> None:
+    """A dependency that is a few seconds late during a deploy should not crash-loop the app."""
+    for attempt in range(1, STARTUP_ATTEMPTS + 1):
+        try:
+            await _check_dependencies()
+            return
+        except Exception as exc:
+            if attempt == STARTUP_ATTEMPTS:
+                logger.error("app_startup_failed", attempts=attempt, error=str(exc))
+                raise
+            delay = STARTUP_RETRY_DELAY_S * attempt
+            logger.warning(
+                "startup_dependency_check_failed",
+                attempt=attempt,
+                retry_in_s=delay,
+                error_type=type(exc).__name__,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _close_clients() -> None:
+    # separate try blocks: a failing Redis close must not leave the DB pool open
+    try:
+        await redis_server.aclose()
+    except Exception as exc:
+        logger.warning("redis_close_failed", error_type=type(exc).__name__)
+    try:
+        await engine.dispose()
+    except Exception as exc:
+        logger.warning("engine_dispose_failed", error_type=type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app_name = app.title
     logger.info("app_startup_beginning", app_name=app_name)
     try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-            logger.info("app_ready", app_name=app_name, environment=settings.environment)
-
-        await redis_server.ping()
-        logger.info("redis_connection_successful")
-
-    except Exception as e:
-        logger.error("app_startup_failed", error=str(e))
-        raise
-
-    yield
-    logger.info("app_shutting_down", app_name=app_name)
-    await redis_server.close()
+        await _wait_for_dependencies()
+        logger.info("app_ready", app_name=app_name, environment=settings.environment)
+        yield
+    finally:
+        logger.info("app_shutting_down", app_name=app_name)
+        await _close_clients()
 
 
 app = FastAPI(

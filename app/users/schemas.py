@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, ValidationInfo, field_validator
 
+from app.schemas import Password
+
 
 # Tools
 class NormalizedEmailMixin(BaseModel):
@@ -15,7 +17,9 @@ class NormalizedEmailMixin(BaseModel):
 # Request Schemas
 class UserCreateSchema(NormalizedEmailMixin):
     email: EmailStr = Field(..., max_length=255, description="The email of the user")
-    password: str = Field(..., min_length=8, max_length=60, description="The password of the user")
+    password: Password = Field(
+        ..., min_length=8, max_length=60, description="The password of the user"
+    )
     username: str = Field(
         ...,
         min_length=3,
@@ -56,7 +60,7 @@ class BulkDeleteUsersSchema(BaseModel):
 
 
 class ResetPasswordSchema(BaseModel):
-    password: str = Field(
+    password: Password = Field(
         ..., min_length=8, max_length=60, description="The new password of the user"
     )
     confirm_password: str = Field(
@@ -72,10 +76,10 @@ class ResetPasswordSchema(BaseModel):
 
 
 class UpdatePasswordSchema(BaseModel):
-    old_password: str = Field(
+    old_password: Password = Field(
         ..., min_length=8, max_length=60, description="The old password of the user"
     )
-    new_password: str = Field(
+    new_password: Password = Field(
         ..., min_length=8, max_length=60, description="The new password of the user"
     )
     confirm_new_password: str = Field(
