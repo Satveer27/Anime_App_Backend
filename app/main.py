@@ -1,18 +1,20 @@
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from redis.exceptions import RedisError
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
-from app.core.database.database import engine, get_db
+from app.core.database.database import engine
 from app.core.redis.redis_client import redis_server
 from app.exceptions import (
     AppError,
     handle_app_error,
+    handle_dependency_unavailable,
     handle_http_exception,
     handle_internal_exception,
     handle_validation_error,
@@ -70,6 +72,8 @@ app.include_router(main_router, prefix="/api/v1")
 app.add_exception_handler(AppError, handle_app_error)
 app.add_exception_handler(RequestValidationError, handle_validation_error)
 app.add_exception_handler(StarletteHTTPException, handle_http_exception)
+app.add_exception_handler(RedisError, handle_dependency_unavailable)
+app.add_exception_handler(DBAPIError, handle_dependency_unavailable)
 app.add_exception_handler(Exception, handle_internal_exception)
 
 
@@ -77,13 +81,3 @@ app.add_exception_handler(Exception, handle_internal_exception)
 @app.get("/", tags=["health"], summary="Welcome message")
 async def read_root():
     return {"message": "Welcome to AnimePlanet FastAPI application!"}
-
-
-@app.get("/health", tags=["health"], summary="Database connectivity check")
-async def check_health(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(text("SELECT 1"))
-    if result.scalar() == 1:
-        return {"status": "healthy"}
-    else:
-        logger.error("health_check_failed", reason="db_query_returned_unexpected_result")
-        return {"status": "unhealthy"}

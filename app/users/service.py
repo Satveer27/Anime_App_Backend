@@ -3,6 +3,7 @@ from uuid import UUID
 
 import structlog
 from kombu.exceptions import OperationalError
+from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError
 
 from app.core.redis.redis_client import redis_server
@@ -445,6 +446,7 @@ class UserService:
         not_found_ids = []
         deleted_ids = []
         skipped_admin_ids = []
+        revoke_failed_ids = []
 
         for user_id in user_ids:
             user = await self.user_repository.get_user_by_id(user_id)
@@ -463,8 +465,18 @@ class UserService:
             else:
                 await self.user_repository.delete_user(user)
                 await self.user_repository.commit()
-                await revoke_access_to_all_tokens(user_id)
                 deleted_ids.append(str(user_id))
+                try:
+                    await revoke_access_to_all_tokens(user_id)
+                except RedisError as exc:
+                    # keep going so earlier commits are still reported to the caller
+                    logger.error(
+                        "bulk_delete_revoke_failed",
+                        admin_id=str(admin_id),
+                        user_id=str(user_id),
+                        error_type=type(exc).__name__,
+                    )
+                    revoke_failed_ids.append(str(user_id))
 
         logger.info(
             "bulk_users_deleted",
@@ -472,7 +484,11 @@ class UserService:
             deleted_count=len(deleted_ids),
             not_found_count=len(not_found_ids),
             skipped_admin_count=len(skipped_admin_ids),
+            revoke_failed_count=len(revoke_failed_ids),
         )
         return BulkDeleteResult(
-            deleted=deleted_ids, not_found=not_found_ids, skipped_admins=skipped_admin_ids
+            deleted=deleted_ids,
+            not_found=not_found_ids,
+            skipped_admins=skipped_admin_ids,
+            revoke_failed=revoke_failed_ids,
         )

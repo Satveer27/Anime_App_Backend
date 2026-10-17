@@ -142,3 +142,5 @@ class BulkDeleteResult(BaseModel):
     deleted: list[UUID]
     not_found: list[UUID]
     skipped_admins: list[UUID]
+    # deleted from the DB, but their access tokens could not be revoked in Redis (they expire on their own)
+    revoke_failed: list[UUID] = []

@@ -921,3 +921,30 @@ class TestDeleteMultipleUsersByIdsService:
         )
 
         assert events == ["delete", "commit", "revoke"] * 2
+
+
+class TestBulkDeleteRedisOutage:
+    async def test_redis_failure_is_reported_and_loop_continues(
+        self, user_service, mock_user_repository, mocker, make_user
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        first, second = make_user(is_admin=False), make_user(is_admin=False)
+        users = {first.id: first, second.id: second}
+
+        async def get_user_by_id(user_id):
+            return users[user_id]
+
+        mock_user_repository.get_user_by_id.side_effect = get_user_by_id
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=[RedisConnectionError("boom"), None],
+        )
+
+        result = await user_service.delete_multiple_users_by_ids_service(
+            [first.id, second.id], admin_id=uuid4()
+        )
+
+        assert result.deleted == [first.id, second.id]
+        assert result.revoke_failed == [first.id]
+        assert mock_user_repository.commit.call_count == 2

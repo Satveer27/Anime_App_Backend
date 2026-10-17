@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
+from redis.exceptions import RedisError
 
 from app.config import settings
 from app.exceptions import AuthenticationError
@@ -56,7 +57,13 @@ class JWTService:
             logger.warning("refresh_token_reuse_detected", user_id=sub, jti=jti)
             await self.refresh_token_repository.delete_all_refresh_tokens_for_user(UUID(sub))
             await self.refresh_token_repository.commit()
-            await revoke_access_to_all_tokens(UUID(sub))
+            try:
+                await revoke_access_to_all_tokens(UUID(sub))
+            except RedisError as exc:
+                # The DB wipe is committed; the caller still gets the 401 below, not a 503.
+                logger.error(
+                    "reuse_access_token_revoke_failed", user_id=sub, error_type=type(exc).__name__
+                )
             logger.warning("all_sessions_revoked_due_to_reuse", user_id=sub)
 
             raise AuthenticationError("Session invalid, please login again.")
@@ -143,6 +150,10 @@ class JWTService:
                     await revoke_single_access_token(jti_access, exp_access, UUID(sub_access))
             except InvalidTokenError:
                 pass
+            except RedisError as exc:
+                # Don't let a Redis outage block logout: the refresh token below is still revoked
+                # and the short-lived access token expires on its own.
+                logger.error("logout_access_token_revoke_failed", error_type=type(exc).__name__)
 
         if refresh_token is None:
             logger.info("logout_no_refresh_token")

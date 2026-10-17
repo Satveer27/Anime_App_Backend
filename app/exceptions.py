@@ -123,6 +123,19 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException):
     )
 
 
+async def handle_dependency_unavailable(request: Request, exc: Exception):
+    logger.error(
+        "dependency_unavailable",
+        error_type=type(exc).__name__,
+        path=str(request.url),
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "5"},
+        content={"status_code": 503, "error": ServiceUnavailableError.default_message},
+    )
+
+
 async def handle_internal_exception(request: Request, exc: Exception):
     logger.error("unhandled_exception", path=str(request.url), error=str(exc))
     return JSONResponse(
