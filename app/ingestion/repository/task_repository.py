@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,9 @@ MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 60
 BACKOFF_CAP_SECONDS = 6 * 3600
 LAST_ERROR_MAX_CHARS = 500
+# The only states a refresh may send back to pending. dead and gone are never retried
+# automatically (ADR 0014); a new status stays excluded until it is added here on purpose.
+REFRESHABLE_STATUSES = [TaskStatus.DONE, TaskStatus.FAILED]
 
 
 class TaskRepository:
@@ -19,7 +22,7 @@ class TaskRepository:
         self.db = db
 
     async def insert_tasks(self, rows: list[tuple[int, Resource]]) -> int:
-        if not rows or len(rows) == 0:
+        if not rows:
             return 0
 
         stmt = (
@@ -29,6 +32,36 @@ class TaskRepository:
         )
         result = await self.db.execute(stmt)
         return result.rowcount
+
+    async def insert_or_reset_tasks(self, rows: list[tuple[int, Resource]]) -> tuple[int, int]:
+        """Insert missing tasks and send finished or failed ones back to pending (a refresh).
+
+        `dead`, `gone` and tasks that are already `pending` are left untouched. Returns
+        (inserted, reset); rows that were left untouched are in neither count. Each
+        (mal_id, resource) may appear only once in `rows`.
+        """
+        if not rows:
+            return 0, 0
+
+        stmt = insert(IngestionTask).values(
+            [{"mal_id": mal_id, "resource": resource} for mal_id, resource in rows]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["mal_id", "resource"],
+            set_={
+                "status": TaskStatus.PENDING,
+                "attempts": 0,
+                "next_attempt_at": None,
+                "last_error": None,
+                # onupdate does not apply to ON CONFLICT DO UPDATE
+                "updated_at": func.now(),
+            },
+            where=IngestionTask.status.in_(REFRESHABLE_STATUSES),
+        ).returning(literal_column("(xmax = 0)"))  # true for a fresh insert, false for an update
+        result = await self.db.execute(stmt)
+        was_inserted = result.scalars().all()
+        inserted = sum(was_inserted)
+        return inserted, len(was_inserted) - inserted
 
     async def claim_next(self) -> IngestionTask | None:
         """Select the next claimable task and lock it until the caller commits or rolls back."""
@@ -85,7 +118,7 @@ class TaskRepository:
             .where(
                 IngestionTask.mal_id.in_(mal_ids),
                 IngestionTask.resource.in_(resources),
-                IngestionTask.status.in_([TaskStatus.DONE, TaskStatus.FAILED]),
+                IngestionTask.status.in_(REFRESHABLE_STATUSES),
             )
             .values(
                 status=TaskStatus.PENDING,

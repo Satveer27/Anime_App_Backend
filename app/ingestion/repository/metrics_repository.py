@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,16 @@ class MetricsRepository:
                 error=error[:ERROR_MAX_CHARS] if error else None,
             )
         )
+
+    async def latest_run(self, job: str) -> IngestionRun | None:
+        """The most recent run of a job, e.g. to read its summary["resume_page"] after a failure."""
+        result = await self.db.execute(
+            select(IngestionRun)
+            .where(IngestionRun.job == job)
+            .order_by(IngestionRun.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def commit(self) -> None:
         await self.db.commit()

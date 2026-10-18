@@ -37,34 +37,76 @@ class DiscoveryJob:
         # Must use its own session so the run record survives a failure in the task session.
         self.metrics_repository = metrics_repository
 
-    async def run_job_overall(self, page: int = 1) -> dict[str, float]:
-        """Page through Tenrai's anime list and create the missing tasks.
+    async def run_job_overall(self, page: int = 1) -> dict:
+        """Page through Tenrai's whole anime list and create the missing tasks.
+
+        Existing tasks are left untouched, so re-running (even from page 1) is always safe.
+        """
+        return await self._run(JOB_NAME, page, {}, DISCOVERY_RESOURCES, reset_existing=False)
+
+    async def run_job_refresh(
+        self,
+        job_name: str,
+        filters: dict,
+        resources: tuple[Resource, ...] = DISCOVERY_RESOURCES,
+        page: int = 1,
+    ) -> dict:
+        """Page through a filtered anime list for a refresh.
+
+        Anime we have never seen get their tasks created. Anime we already have get their
+        `done` and `failed` tasks sent back to `pending`; `dead` and `gone` stay for inspection.
+        `job_name` is the name the run is recorded under (e.g. "discovery_weekly").
+
+        Run it before the worker starts, not in the middle of a worker run: it would send tasks
+        the worker has already finished back to pending.
+        """
+        return await self._run(job_name, page, filters, resources, reset_existing=True)
+
+    async def _run(
+        self,
+        job_name: str,
+        page: int,
+        filters: dict,
+        resources: tuple[Resource, ...],
+        reset_existing: bool,
+    ) -> dict:
+        """The paging loop shared by the overall and refresh runs.
 
         Commits once per page. A failed page stops the job and re-raises: everything before it
-        is already saved, and re-running is safe because existing tasks are left untouched.
-        The run and its metrics are recorded in ingestion_run, whether it succeeds or fails.
+        is already saved. The run and its metrics are recorded in ingestion_run, whether it
+        succeeds or fails; on failure summary["resume_page"] is the page to pass next.
         """
-
+        params = {"type": LIST_TYPES, **filters}
         has_next = True
         summary = {
+            "start_page": page,
             "pages": 0,
             "anime_seen": 0,
             "anime_skipped": 0,
             "anime_skipped_type": 0,
             "tasks_inserted": 0,
+            "tasks_reset": 0,
+            "tasks_unchanged": 0,
             "list_seconds": 0.0,
             "db_seconds": 0.0,
             "max_list_seconds": 0.0,
         }
         started = time.monotonic()
-        run_id = await self.metrics_repository.start_run(JOB_NAME)
+        run_id = await self.metrics_repository.start_run(job_name)
         await self.metrics_repository.commit()
-        logger.info("discovery_started", run_id=run_id, start_page=page)
+        logger.info(
+            "discovery_started",
+            run_id=run_id,
+            job=job_name,
+            start_page=page,
+            reset_existing=reset_existing,
+            filters=filters,
+        )
 
         try:
             while has_next:
                 list_started = time.monotonic()
-                result = await self.tenrai_adapter.list_anime(page=page, type=LIST_TYPES)
+                result = await self.tenrai_adapter.list_anime(page=page, **params)
                 list_elapsed = time.monotonic() - list_started
                 summary["list_seconds"] += list_elapsed
                 summary["max_list_seconds"] = max(summary["max_list_seconds"], list_elapsed)
@@ -84,29 +126,42 @@ class DiscoveryJob:
                         summary["anime_skipped_type"] += 1
                         continue
 
-                    for resource in DISCOVERY_RESOURCES:
+                    for resource in resources:
                         rows.append((mal_id, resource))
+                # an anime listed twice on one page would make the upsert hit a row twice
+                rows = list(dict.fromkeys(rows))
 
                 db_started = time.monotonic()
-                summary["tasks_inserted"] += await self.task_repository.insert_tasks(rows)
+                if reset_existing:
+                    inserted, reset = await self.task_repository.insert_or_reset_tasks(rows)
+                    summary["tasks_inserted"] += inserted
+                    summary["tasks_reset"] += reset
+                    summary["tasks_unchanged"] += len(rows) - inserted - reset
+                else:
+                    summary["tasks_inserted"] += await self.task_repository.insert_tasks(rows)
                 await self.task_repository.commit()
                 summary["db_seconds"] += time.monotonic() - db_started
                 summary["pages"] += 1
 
                 if summary["pages"] % PROGRESS_EVERY_PAGES == 0:
-                    logger.info("discovery_progress", **self._metrics(summary, started))
+                    logger.info(
+                        "discovery_progress", run_id=run_id, **self._metrics(summary, started)
+                    )
                 page += 1
         except Exception as exc:
             failed = self._metrics(summary, started)
-            logger.exception("discovery_failed", run_id=run_id, failed_page=page, **failed)
+            failed["failed_page"] = page
+            failed["resume_page"] = page  # nothing of this page was committed
+            logger.exception("discovery_failed", run_id=run_id, job=job_name, **failed)
             await self._record_run(run_id, RunStatus.FAILED, failed, f"{type(exc).__name__}: {exc}")
             raise
 
         if summary["anime_skipped_type"]:
             logger.warning("discovery_type_filter_leaked", count=summary["anime_skipped_type"])
         summary = self._metrics(summary, started)
+        summary["resume_page"] = None
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
-        logger.info("discovery_finished", run_id=run_id, **summary)
+        logger.info("discovery_finished", run_id=run_id, job=job_name, **summary)
         return summary
 
     async def _record_run(
@@ -120,7 +175,7 @@ class DiscoveryJob:
             logger.exception("run_record_failed", run_id=run_id)
 
     @staticmethod
-    def _metrics(summary: dict[str, float], started: float) -> dict[str, float]:
+    def _metrics(summary: dict, started: float) -> dict:
         """Add wall time and derived throughput/latency figures for docs/METRICS.md."""
         elapsed = time.monotonic() - started
         pages = summary["pages"]
