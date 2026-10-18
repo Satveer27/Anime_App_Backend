@@ -28,3 +28,6 @@ analysis/tenrai_probe/probe_results_*.jsonl
 
 # OS
 .DS_Store
+
+# Scripts
+app/ingestion/scripts
