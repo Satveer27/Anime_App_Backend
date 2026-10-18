@@ -63,6 +63,15 @@ class TaskRepository:
         inserted = sum(was_inserted)
         return inserted, len(was_inserted) - inserted
 
+    async def count_by_status(self) -> dict[str, int]:
+        """How many tasks are in each state (every state is present, 0 if empty)."""
+        result = await self.db.execute(
+            select(IngestionTask.status, func.count()).group_by(IngestionTask.status)
+        )
+        counts = {status.value: 0 for status in TaskStatus}
+        counts.update({status.value: count for status, count in result.all()})
+        return counts
+
     async def claim_next(self) -> IngestionTask | None:
         """Select the next claimable task and lock it until the caller commits or rolls back."""
         now = datetime.now(UTC)
@@ -87,6 +96,16 @@ class TaskRepository:
 
     async def mark_gone(self, task: IngestionTask) -> None:
         await self._set(task, status=TaskStatus.GONE, next_attempt_at=None)
+
+    async def mark_dead(self, task: IngestionTask, error: str) -> None:
+        """Give up on a task whose request can never succeed (a 4xx other than 404). Never retried."""
+        await self._set(
+            task,
+            status=TaskStatus.DEAD,
+            attempts=task.attempts + 1,
+            next_attempt_at=None,
+            last_error=error[:LAST_ERROR_MAX_CHARS],
+        )
 
     async def mark_failed(self, task: IngestionTask, error: str) -> None:
         attempts = task.attempts + 1
@@ -142,3 +161,6 @@ class TaskRepository:
 
     async def commit(self) -> None:
         await self.db.commit()
+
+    async def rollback(self) -> None:
+        await self.db.rollback()

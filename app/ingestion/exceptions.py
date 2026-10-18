@@ -28,3 +28,11 @@ class CircuitOpenError(AdapterError):
     def __init__(self, retry_after_s: float) -> None:
         super().__init__(f"circuit open, retry in {retry_after_s:.0f}s")
         self.retry_after_s = retry_after_s
+
+
+class RepeatedUnexpectedErrors(Exception):
+    """Several tasks in a row failed in our own code, so the run stopped instead of burning more."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(f"{count} unexpected errors in a row")
+        self.count = count

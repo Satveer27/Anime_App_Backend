@@ -221,3 +221,13 @@ async def test_reset_tasks_only_touches_done_and_failed(pg_session):
     assert await status_of(pg_session, 4) is TaskStatus.GONE
     pg_session.expire_all()
     assert (await repo.get_task(1, Resource.DETAILS)).attempts == 0
+
+
+async def test_count_by_status_includes_every_state(pg_session):
+    await seed(pg_session, 1, status=TaskStatus.DONE)
+    await seed(pg_session, 2, status=TaskStatus.DONE)
+    await seed(pg_session, 3, status=TaskStatus.FAILED)
+
+    counts = await TaskRepository(pg_session).count_by_status()
+
+    assert counts == {"pending": 0, "done": 2, "failed": 1, "dead": 0, "gone": 0}

@@ -134,6 +134,9 @@ class TenraiAdapter:
     async def get_full(self, anime_id: int) -> dict:
         return await self._get(f"/anime/{anime_id}/full")
 
+    async def get_statistics(self, anime_id: int) -> dict:
+        return await self._get(f"/anime/{anime_id}/statistics")
+
     async def get_episodes(self, anime_id: int, page: int = 1) -> dict:
         return await self._get(f"/anime/{anime_id}/episodes", {"page": page})
 

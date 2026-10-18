@@ -302,3 +302,11 @@ async def test_list_anime_passes_extra_filters_and_drops_none():
     assert params["page"] == "2"
     assert "status" not in params
     assert "rating" in params
+
+
+async def test_get_statistics_hits_the_statistics_endpoint():
+    h = Harness([ok()])
+
+    await h.adapter.get_statistics(7)
+
+    assert h.requests[0].url.path == "/v1/anime/7/statistics"
