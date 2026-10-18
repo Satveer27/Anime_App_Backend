@@ -1,0 +1,111 @@
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.ingestion.enums.resource_enum import Resource
+from app.ingestion.enums.task_status_enum import TaskStatus
+from app.ingestion.models import IngestionTask
+
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_SECONDS = 60
+BACKOFF_CAP_SECONDS = 6 * 3600
+LAST_ERROR_MAX_CHARS = 500
+
+
+class TaskRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def insert_tasks(self, rows: list[tuple[int, Resource]]) -> int:
+        if not rows or len(rows) == 0:
+            return 0
+
+        stmt = (
+            insert(IngestionTask)
+            .values([{"mal_id": mal_id, "resource": resource} for mal_id, resource in rows])
+            .on_conflict_do_nothing(index_elements=["mal_id", "resource"])
+        )
+        result = await self.db.execute(stmt)
+        return result.rowcount
+
+    async def claim_next(self) -> IngestionTask | None:
+        """Select the next claimable task and lock it until the caller commits or rolls back."""
+        now = datetime.now(UTC)
+        stmt = (
+            select(IngestionTask)
+            .where(
+                IngestionTask.status.in_([TaskStatus.PENDING, TaskStatus.FAILED]),
+                or_(
+                    IngestionTask.next_attempt_at.is_(None),
+                    IngestionTask.next_attempt_at <= now,
+                ),
+            )
+            .order_by(IngestionTask.mal_id, IngestionTask.resource)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def mark_done(self, task: IngestionTask) -> None:
+        await self._set(task, status=TaskStatus.DONE, next_attempt_at=None, last_error=None)
+
+    async def mark_gone(self, task: IngestionTask) -> None:
+        await self._set(task, status=TaskStatus.GONE, next_attempt_at=None)
+
+    async def mark_failed(self, task: IngestionTask, error: str) -> None:
+        attempts = task.attempts + 1
+        if attempts >= MAX_ATTEMPTS:
+            status, next_attempt_at = TaskStatus.DEAD, None
+        else:
+            delay = min(BACKOFF_BASE_SECONDS * 2**attempts, BACKOFF_CAP_SECONDS)
+            status = TaskStatus.FAILED
+            next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+        await self._set(
+            task,
+            status=status,
+            attempts=attempts,
+            next_attempt_at=next_attempt_at,
+            last_error=error[:LAST_ERROR_MAX_CHARS],
+        )
+
+    async def _set(self, task: IngestionTask, **values) -> None:
+        await self.db.execute(
+            update(IngestionTask)
+            .where(IngestionTask.mal_id == task.mal_id, IngestionTask.resource == task.resource)
+            .values(**values)
+        )
+
+    async def reset_tasks(self, mal_ids: list[int], resources: list[Resource]) -> int:
+        """Send finished or failed tasks back to pending for a refresh."""
+        result = await self.db.execute(
+            update(IngestionTask)
+            .where(
+                IngestionTask.mal_id.in_(mal_ids),
+                IngestionTask.resource.in_(resources),
+                IngestionTask.status.in_([TaskStatus.DONE, TaskStatus.FAILED]),
+            )
+            .values(
+                status=TaskStatus.PENDING,
+                attempts=0,
+                next_attempt_at=None,
+                last_error=None,
+            )
+        )
+        return result.rowcount
+
+    async def get_task(self, id: int, resource: Resource) -> IngestionTask | None:
+        result = await self.db.execute(
+            select(IngestionTask).where(
+                IngestionTask.mal_id == id, IngestionTask.resource == resource
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_task(self, task: IngestionTask) -> None:
+        await self.db.delete(task)
+
+    async def commit(self) -> None:
+        await self.db.commit()
