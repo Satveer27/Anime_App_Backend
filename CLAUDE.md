@@ -59,7 +59,7 @@ Use structlog with key-value fields (`log.info("refresh_token_revoked", user_id=
 - Services log key business events.
 - Small pure utilities (e.g. the rate limiter) don't log.
 
-Log an exception once, where it is handled, not at every layer it passes through. Never log secrets or personal data (usernames, emails, tokens).
+Log an exception once, where it is handled, not at every layer it passes through. Never log secrets or personal data (emails, tokens, our own users' accounts). MAL reviewer usernames in Tenrai responses are public data and may be logged.
 
 ## Workflow rules
 

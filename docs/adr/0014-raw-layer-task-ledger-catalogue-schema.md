@@ -38,7 +38,7 @@ The pipeline stores each source response untouched in a raw table, tracks every 
 - **`ingestion_task` is Tenrai-specific for now**, because it is keyed by `mal_id`. How the other sources track their fetches is decided with their pipelines.
 - **Several pipelines write the same `anime` and `episode` rows**, so each upsert must update only the columns it owns.
 - **Characters** get their own pipeline later, with descriptions fetched per character. `anime.background` is kept as context for LLM answers about why a show is notable.
-- **Reviews accumulate**, so ranking all stored reviews by `reaction_overall` is approximate: reviews that left page 1 keep stale counts, and reviews MAL deleted stay in the table. The reviewer's `username` and its URL are stored. They are third-party personal data, so never log them or send them to an LLM. The review `tags` field is dropped from the table, but it stays in `raw_tenrai`.
+- **Reviews accumulate**, so ranking all stored reviews by `reaction_overall` is approximate: reviews that left page 1 keep stale counts, and reviews MAL deleted stay in the table. The reviewer's `username` and its URL are stored. They are public MAL profile data, so they may appear in logs (for example the response logged when a task fails). Do not send them to an LLM. The review `tags` field is dropped from the table, but it stays in `raw_tenrai`.
 - **Tests:** SQL here is verified with the real-Postgres exception in ADR 0006, not mocks.
 
 ## Revisit if
