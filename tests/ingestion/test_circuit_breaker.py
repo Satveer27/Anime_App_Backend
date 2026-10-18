@@ -1,7 +1,7 @@
 import pytest
 
-from app.ingestion.circuit_breaker import CircuitBreaker
 from app.ingestion.exceptions import CircuitOpenError
+from app.ingestion.utils.circuit_breaker import CircuitBreaker
 
 
 class FakeClock:

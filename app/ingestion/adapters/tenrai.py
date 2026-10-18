@@ -4,9 +4,9 @@ from collections.abc import Awaitable, Callable
 import httpx
 import structlog
 
-from app.ingestion.circuit_breaker import CircuitBreaker
 from app.ingestion.exceptions import GoneError, NetworkError, PermanentError, TransientError
-from app.ingestion.rate_limiter import RateLimiter
+from app.ingestion.utils.circuit_breaker import CircuitBreaker
+from app.ingestion.utils.rate_limiter import RateLimiter
 
 log = structlog.get_logger(__name__)
 RETRYABLE_STATUSES = {500, 502, 503, 504}
@@ -141,6 +141,13 @@ class TenraiAdapter:
         return await self._get(f"/anime/{anime_id}/reviews", {"page": page})
 
     async def list_anime(
-        self, page: int = 1, limit: int = 100, rating: str = "g,pg,pg13,r17,r"
+        self,
+        page: int = 1,
+        limit: int = 100,
+        rating: str = "g,pg,pg13,r17,r",
+        **filters: str | int | None,
     ) -> dict:
-        return await self._get("/anime", {"page": page, "limit": limit, "rating": rating})
+        """List anime. Extra keyword filters (e.g. type, status) go straight into the query."""
+        params = {"page": page, "limit": limit, "rating": rating}
+        params.update({k: v for k, v in filters.items() if v is not None})
+        return await self._get("/anime", params)
