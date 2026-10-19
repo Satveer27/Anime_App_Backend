@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,15 @@ from app.catalogue.models import (
 )
 
 ROWS_PER_STATEMENT = 500
+
+
+def _set_columns(obj) -> dict:
+    """The attributes a parser set on a model object, as a row dict.
+
+    One it never set (such as `imdb_score`) is left out, so an upsert cannot overwrite another
+    pipeline's value, while one it set to None is written as NULL.
+    """
+    return {name: value for name, value in obj.__dict__.items() if not name.startswith("_")}
 
 
 class CatalogueRepository:
@@ -38,13 +47,31 @@ class CatalogueRepository:
         result = await self.db.execute(select(Anime.mal_id).where(Anime.mal_id == mal_id))
         return result.scalar_one_or_none() is not None
 
+    async def existing_anime_ids(self, ids: Iterable[int]) -> set[int]:
+        """Which of these anime ids have a row, in one query. Meant for up to a few thousand ids."""
+        ids = set(ids)
+        if not ids:
+            return set()
+        result = await self.db.execute(select(Anime.mal_id).where(Anime.mal_id.in_(ids)))
+        return set(result.scalars().all())
+
     async def get_synopsis_hash(self, mal_id: int) -> str | None:
         """The stored synopsis hash, or None if the anime or its hash is missing."""
         result = await self.db.execute(select(Anime.synopsis_hash).where(Anime.mal_id == mal_id))
         return result.scalar_one_or_none()
 
-    async def upsert_anime(self, row: dict) -> None:
-        await self._upsert(Anime, [row])
+    async def upsert_anime(self, animes: Sequence[Anime]) -> int:
+        """Upsert the Anime objects the parser built, in bulk.
+
+        Returns how many rows were inserted or changed: an anime whose stored values already
+        match is left untouched, so `updated_at` means "last time the data changed".
+
+        Only the attributes the parser set are written. An attribute it never set (such as
+        `imdb_score`) is left out, so another pipeline's value is not overwritten, while one it
+        set to None is written as NULL.
+        """
+        rows = [_set_columns(anime) for anime in animes]
+        return await self._upsert(Anime, rows, only_if_changed=True)
 
     # --- tags and studios ----------------------------------------------------------------
 
@@ -89,15 +116,29 @@ class CatalogueRepository:
 
     # --- one-to-many rows ------------------------------------------------------------------
 
-    async def upsert_statistics(self, row: dict) -> None:
-        await self._upsert(AnimeStatisticsMal, [row])
+    async def upsert_statistics(self, statistics: Sequence[AnimeStatisticsMal]) -> int:
+        """Upsert the statistics rows the parser built, in bulk; returns rows written."""
+        return await self._upsert(AnimeStatisticsMal, [_set_columns(row) for row in statistics])
 
-    async def upsert_episodes(self, rows: Sequence[dict]) -> int:
-        return await self._upsert(Episode, rows)
+    async def upsert_episodes(self, episodes: Sequence[Episode]) -> int:
+        """Upsert the Episode objects the parser built, in bulk; returns rows written.
 
-    async def upsert_reviews(self, rows: Sequence[dict]) -> int:
-        """Upsert on the review's own mal_id. Reviews are added and updated, never deleted."""
-        return await self._upsert(Review, rows)
+        MAL's synopsis wins when it has one, and a MAL episode with no synopsis keeps whatever is
+        stored (e.g. one an IMDb pipeline filled in later), so a refresh cannot wipe it.
+        """
+        return await self._upsert(
+            Episode,
+            [_set_columns(episode) for episode in episodes],
+            keep_when_new_is_null=("synopsis", "synopsis_hash"),
+        )
+
+    async def upsert_reviews(self, reviews: Sequence[Review]) -> int:
+        """Upsert the Review objects the parser built, in bulk, on the review's own mal_id.
+
+        Reviews are added and updated, never deleted, and `updated_at` moves on every upsert
+        because it means "last seen" (ADR 0014).
+        """
+        return await self._upsert(Review, [_set_columns(review) for review in reviews])
 
     # --- transaction -----------------------------------------------------------------------
 
@@ -109,10 +150,20 @@ class CatalogueRepository:
 
     # --- helpers ---------------------------------------------------------------------------
 
-    async def _upsert(self, model, rows: Sequence[dict]) -> int:
+    async def _upsert(
+        self,
+        model,
+        rows: Sequence[dict],
+        only_if_changed: bool = False,
+        keep_when_new_is_null: Sequence[str] = (),
+    ) -> int:
         """Insert the rows; where one with the same primary key exists, update it instead.
 
-        Only the columns in the row dicts are written. Returns how many rows were written.
+        Only the columns in the row dicts are written. With `only_if_changed`, an existing row
+        is updated only if one of those columns differs (NULLs compare correctly), so identical
+        rows cause no write. For the columns in `keep_when_new_is_null`, a NULL in the new row
+        keeps the stored value instead of overwriting it. Returns how many rows were inserted or
+        updated.
         """
         if not rows:
             return 0
@@ -122,10 +173,19 @@ class CatalogueRepository:
         # have thousands of episodes.
         for start in range(0, len(rows), ROWS_PER_STATEMENT):
             stmt = insert(model).values(rows[start : start + ROWS_PER_STATEMENT])
-            update = {column: stmt.excluded[column] for column in rows[0] if column not in keys}
+            columns = [column for column in rows[0] if column not in keys]
+            update = {column: stmt.excluded[column] for column in columns}
+            for column in keep_when_new_is_null:
+                if column in update:
+                    update[column] = func.coalesce(stmt.excluded[column], getattr(model, column))
             if "updated_at" in model.__table__.c:
                 update["updated_at"] = func.now()  # onupdate does not apply to upserts
-            stmt = stmt.on_conflict_do_update(index_elements=keys, set_=update)
+            differs = None
+            if only_if_changed:
+                differs = tuple_(*(getattr(model, c) for c in columns)).is_distinct_from(
+                    tuple_(*(stmt.excluded[c] for c in columns))
+                )
+            stmt = stmt.on_conflict_do_update(index_elements=keys, set_=update, where=differs)
             written += (await self.db.execute(stmt)).rowcount
         return written
 
