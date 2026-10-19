@@ -68,6 +68,8 @@ The fetch job claims tasks one at a time, fetches the Resource from Tenrai, stor
 |---|---|
 | `tasks` | Tasks processed in this run. Always `done + failed + dead + gone`. |
 | `done` | Fetched and stored. |
+| `first_try_tasks` | Tasks in this run that had never failed before: the first attempt of each task. A task that failed and is claimed again later is counted in `tasks` again but not here. It is the denominator of the first-try success rate. |
+| `done_first_try` | The part of `done` that had no failed attempt before: the task succeeded the first time it was claimed. `done - done_first_try` succeeded only after one or more earlier `failed` attempts. It counts task attempts, not requests: the adapter's own retries inside one attempt (a 503 retried after 1 s) are not included. |
 | `gone` | Tenrai answered 404: the anime or resource no longer exists. |
 | `dead` | A permanent problem: a 4xx other than 404, a response that was not valid JSON, a Resource with no fetcher, or episodes still paging after 100 pages. Never retried automatically. |
 | `failed` | Marked `failed` this run: a temporary error (5xx, 429, network) that outlasted the adapter's own retries, or an unexpected error in our code. The task backs off and is retried later, and becomes `dead` after 5 attempts. This counts task outcomes in this run, so a task that fails again in a later run is counted again. |
@@ -90,6 +92,17 @@ A stopped run has `status = 'failed'`, `error` set, and `stopped_by` naming the 
 | `CircuitOpenError` | Tenrai failed repeatedly, so the circuit breaker is open. The task in hand was released untouched and used no attempt. | Wait, then re-run. |
 | a SQLAlchemy error (e.g. `OperationalError`) | The database failed, or Postgres rejected a payload. The task was rolled back and stays `pending`. | Find the cause; the log line `task_aborted_database` has the task key. A rejected payload will stop every run at that task until fixed. |
 | `RepeatedUnexpectedErrors` | 10 tasks in a row failed in our own code (each was marked `failed`). Probably a bug, not one bad anime. | Read the `task_failed_unexpected` logs, which include the response, then fix and re-run. |
+
+### Success rates
+`tasks` mixes first attempts with retries: a task that failed is claimed again once its backoff has passed, usually inside the same run, so it appears in `tasks` twice. So use these:
+
+| Rate | Formula |
+|---|---|
+| First-try success | `done_first_try / first_try_tasks` |
+| Retry success | `(done - done_first_try) / (tasks - first_try_tasks)` |
+| Attempt outcome mix | `done`, `failed`, `dead`, `gone` as shares of `tasks` |
+
+`failed` is not final: a failed task is retried later and may still end `done`. The final result per task is in `queue_after` (and in `ingestion_task`): the share of tasks that ended `done`, `dead` or `gone`.
 
 ### Reading `queue_after`
 "No task is claimable" is not the same as "everything is done": a `failed` task is waiting out its backoff and is not claimable until its retry time. So a succeeded run can end with `failed` above 0. `queue_after["failed"]` is exactly that number of tasks still waiting. A later run picks them up once their time has passed. `dead` and `gone` stay where they are for you to inspect.

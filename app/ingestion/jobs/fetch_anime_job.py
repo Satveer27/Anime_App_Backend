@@ -36,6 +36,7 @@ PROGRESS_EVERY_TASKS = 500
 class TaskOutcome(NamedTuple):
     resource: Resource
     status: TaskStatus  # done, gone, dead or failed (failed may become dead after enough attempts)
+    first_try: bool  # the task had no failed attempt before this one
 
 
 class FetchAnimeJob:
@@ -71,6 +72,8 @@ class FetchAnimeJob:
         summary = {
             "tasks": 0,
             "done": 0,
+            "first_try_tasks": 0,
+            "done_first_try": 0,
             "failed": 0,
             "dead": 0,
             "gone": 0,
@@ -123,6 +126,7 @@ class FetchAnimeJob:
         if not task:
             return None
 
+        first_try = task.attempts == 0
         key = {"mal_id": task.mal_id, "resource": task.resource.value}
         seen: list = []  # raw responses fetched for this task, logged if it breaks
         try:
@@ -167,7 +171,7 @@ class FetchAnimeJob:
             status = TaskStatus.FAILED
 
         await self.task_repository.commit()
-        return TaskOutcome(task.resource, status)
+        return TaskOutcome(task.resource, status, first_try)
 
     async def _fetch(self, task: IngestionTask, seen: list) -> dict | list[dict]:
         """The payload to store: one response, or the list of pages for episodes."""
@@ -221,6 +225,10 @@ class FetchAnimeJob:
     def _record(summary: dict, outcome: TaskOutcome, seconds: float) -> None:
         summary["tasks"] += 1
         summary[outcome.status.value] += 1
+        if outcome.first_try:
+            summary["first_try_tasks"] += 1
+        if outcome.status is TaskStatus.DONE and outcome.first_try:
+            summary["done_first_try"] += 1
         summary["task_seconds"] += seconds
         summary["max_task_seconds"] = max(summary["max_task_seconds"], seconds)
         bucket = summary["by_resource"].setdefault(

@@ -285,7 +285,7 @@ async def test_no_claimable_task_returns_none_and_touches_nothing(task_repo, raw
 async def test_each_task_returns_its_resource_and_outcome(task_repo, raw_repo, response, expected):
     job = make_job(FakeAdapter(full=response), task_repo, raw_repo)
 
-    assert await job.fetch_job_from_tasks() == TaskOutcome(Resource.DETAILS, expected)
+    assert await job.fetch_job_from_tasks() == TaskOutcome(Resource.DETAILS, expected, True)
 
 
 # --- the loop and its run record ----------------------------------------------------------
@@ -443,3 +443,42 @@ async def test_progress_is_logged_every_so_many_tasks(task_repo, raw_repo, metri
         await job.fetch_from_tasks()
 
     assert len([log for log in logs if log["event"] == "fetch_run_progress"]) == 1
+
+
+# --- first-try metric -----------------------------------------------------------------------
+
+
+async def test_an_outcome_says_whether_it_was_the_tasks_first_try(task_repo, raw_repo):
+    first = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo)
+    assert (await first.fetch_job_from_tasks()).first_try is True
+
+    retried = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo)
+    task_repo.claim_next.return_value = IngestionTask(
+        mal_id=5, resource=Resource.DETAILS, attempts=2
+    )
+    assert (await retried.fetch_job_from_tasks()).first_try is False
+
+
+async def test_the_summary_counts_the_tasks_that_succeeded_on_the_first_try(
+    task_repo, raw_repo, metrics_repo
+):
+    def attempt(mal_id, attempts):
+        return IngestionTask(mal_id=mal_id, resource=Resource.DETAILS, attempts=attempts)
+
+    class Adapter(FakeAdapter):
+        async def get_full(self, mal_id):
+            if mal_id == 4:
+                raise TransientError("503", status_code=503)  # a first-try failure
+            return {"data": {}}
+
+    tasks = [attempt(1, 0), attempt(2, 0), attempt(3, 2), attempt(4, 0)]
+    task_repo.claim_next.side_effect = [*tasks, None]
+    task_repo.count_by_status.return_value = queue()
+    job = FetchAnimeJob(Adapter(), task_repo, raw_repo, metrics_repo)
+
+    summary = await job.fetch_from_tasks()
+
+    assert summary["done"] == 3
+    assert summary["done_first_try"] == 2  # task 3 needed earlier attempts, task 4 failed
+    assert summary["first_try_tasks"] == 3  # tasks 1, 2 and 4 had never failed before
+    assert summary["failed"] == 1

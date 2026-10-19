@@ -8,7 +8,7 @@ from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.task_status_enum import TaskStatus
 from app.ingestion.models import IngestionTask
 
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 60
 BACKOFF_CAP_SECONDS = 6 * 3600
 LAST_ERROR_MAX_CHARS = 500

@@ -212,3 +212,29 @@ async def test_a_loop_stopped_by_an_open_circuit_is_recorded_as_failed(pg_sessio
     assert run.summary["tasks"] == 1
     assert task_two.status is TaskStatus.PENDING  # untouched, no attempt used
     assert task_two.attempts == 0
+
+
+async def test_the_loop_counts_first_try_successes_from_the_attempt_counter(pg_sessionmaker):
+    async with pg_sessionmaker() as s:
+        s.add(IngestionTask(mal_id=1, resource=Resource.DETAILS))  # never failed
+        s.add(IngestionTask(mal_id=2, resource=Resource.DETAILS, attempts=1))  # failed once
+        await s.commit()
+
+    class Adapter:
+        async def get_full(self, mal_id):
+            return {"data": {"mal_id": mal_id}}
+
+    async with pg_sessionmaker() as session, pg_sessionmaker() as metrics:
+        job = FetchAnimeJob(
+            Adapter(),
+            TaskRepository(session),
+            RawTenraiRepository(session),
+            MetricsRepository(metrics),
+        )
+        summary = await job.fetch_from_tasks()
+
+    assert (summary["done"], summary["done_first_try"]) == (2, 1)
+    assert summary["first_try_tasks"] == 1  # only task 1 was on its first attempt
+    async with pg_sessionmaker() as s:
+        run = await MetricsRepository(s).latest_run("fetch_tasks")
+    assert run.summary["done_first_try"] == 1
