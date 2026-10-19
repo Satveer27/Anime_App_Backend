@@ -186,3 +186,58 @@ How long `enqueue()` (a `.delay()` in a worker thread) takes to give up with a 5
 **Why 2.2s and not three attempts:** kombu runs the publish retry with an overall time budget (`timeout=2`, from `broker_connection_timeout`). In both cases the first attempt used the whole budget (2.01s), so kombu's `retry_over_time` raised without sleeping or retrying (it checks `time() > end` after a failed attempt). The remaining ~0.2s is overhead outside the attempt (thread start, connection setup); it was not investigated. `max_retries=2` only applies when attempts fail faster than the 2s budget. A closed port takes about 2s to fail on Windows; on Linux it should be refused immediately, which would allow the retries, but that was not measured.
 
 Reproduce: point `REDIS_BROKER_URL` at the target and time `await enqueue(send_email_verification_task, "a@example.com", "code")`.
+
+## 3. Cleaning the raw layer and the claim query (issue #24), 18-20 Oct 2026
+
+### Parser speed
+Micro-benchmark on a development laptop, on the 700 anime of the probe sample (657 have a synopsis, 574 bytes on average):
+
+| Step | Time |
+|---|---|
+| `clean_full` for one anime | 54 µs |
+| SHA-256 of one synopsis | 1.2 µs |
+| All 26,000 anime | about 1.4 s, of which hashing is about 31 ms |
+
+Parsing is not the bottleneck: reading the JSON and writing the rows is. The parser runs inline, not in a thread pool.
+
+### What the probe sample looks like to the parsers
+Counted over the same 700 anime and their episodes, statistics and reviews:
+
+| Finding | Count |
+|---|---|
+| Anime with no synopsis (null) | 43 of 700 (6.1%) |
+| Synopses ending in `[Written by MAL Rewrite]` | 283 of 700 (40.4%) |
+| Anime with no `year` | 30 of 700 (4.3%); 29 of them have it in `aired.prop.from.year` |
+| Anime with no score | 98 of 700 (14.0%) |
+| Duration formats | 8 shapes (`24 min per ep`, `1 hr 55 min`, `45 sec`, `Unknown`, ...) |
+| Anime with no studio | 174 of 700 (24.9%) |
+| Distinct tag ids / studio ids | 74 / 187 (no id has two names) |
+| Anime with no relations | 153 of 700 (21.9%) |
+| Relation edges to an anime / to a manga | 1,517 / 466 |
+| Anime edges whose target is in the sample | 202 of 1,517 (13.3%), which is why the target has no foreign key |
+| Most anime relations on one anime | 92 |
+| Anime with episodes / episodes in all | 321 / 11,468 |
+| Episodes with score 0 (no score) | 335 (2.9%) |
+| Episodes with no duration / no air date / no synopsis | 2,119 (18.5%) / 970 (8.5%) / 2,212 (19.3%) |
+| Anime whose episode numbers are not 1..n | 2 (a gap at 45, and one that starts at 0) |
+| Reviews (on 435 anime) / with HTML entities | 6,034 / 125 (2.1%) |
+| Text fields with HTML entities: anime / episodes | 0 of 1,541 / 16 of 20,724 (0.08%) |
+
+### Discovery on the real API, 18 Oct 2026
+Two list pages with `type=tv,movie,ova,special,ona,tv_special`: 200 anime seen, 0 skipped by the type safety net, 800 tasks inserted (four per anime). The `type` parameter takes a comma-separated list: `type=Music, CM, PV` returned only those types, in any case and with spaces.
+
+### Claim query against a large task table (synthetic)
+`claim_next` takes the first claimable task in `(mal_id, resource)` order. Finished tasks pile up at the start of that order, so the scan has to skip more of them each time. Measured with `EXPLAIN ANALYZE` on a synthetic table of 115,988 tasks (28,997 anime × 4), local Postgres 16 with everything in memory, one run each. **This is not the ADR 0015 measurement**: it is a synthetic table on a laptop, not the real backfill on the real database. That one is done in #25.
+
+| Index in place | Start (all pending) | Middle (50% done) | End (95% done) | Index size | Marking 100,000 tasks done |
+|---|---|---|---|---|---|
+| Primary key only | 0.06 ms | 23.9 ms | 33.5 ms | none | 743 ms |
+| `(status, next_attempt_at)` | 0.08 ms | 16.6 ms | 33.8 ms | 4.6 MB | 966 ms |
+| Partial `(mal_id, resource)` where status is pending or failed | 0.06 ms | 0.07 ms | 0.24 ms | 9.6 MB* | 682 ms |
+
+- Without the partial index the plan was an index scan on the primary key that removed 58,000 rows by filter in the middle and 110,000 at the end.
+- The planner **did not use** `(status, next_attempt_at)`: its plan stayed on the primary key scan. The query orders by `(mal_id, resource)`, which that index cannot provide.
+- The partial index holds only unfinished tasks, in the order the query wants, so finished tasks cost nothing.
+- *The size is after this test's bulk updates; the same index built when 95% of the tasks were done was 208 kB.
+- The worker waits about 0.6 s per task for the rate limiter, so a claim of 30 ms most likely fits inside that wait and does not slow the backfill. Not measured on a real run.
+
