@@ -1,4 +1,5 @@
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
@@ -93,26 +94,36 @@ class CatalogueRepository:
         rows = [{"mal_id": mal_id, "name": name} for mal_id, name in studios]
         return await self._upsert(Studio, rows)
 
-    # --- link tables: replaced per anime, only when they differ ---------------------------
+    # --- link tables: replaced per anime, in bulk, only when they differ ---------------------
 
-    async def replace_anime_tags(self, anime_id: int, tag_ids: Iterable[int]) -> bool:
-        """Make the anime's tags exactly `tag_ids`. The tags must already exist.
+    async def replace_anime_tags(self, tag_ids_by_anime: Mapping[int, Iterable[int]]) -> int:
+        """Make each anime's tags exactly its list of tag ids. The anime and tags must exist.
 
-        Returns True if rows were written, False if the stored links already matched.
+        An anime mapped to an empty list has its tags cleared. Returns how many anime had
+        their links changed; one whose stored links already match is left untouched.
         """
-        wanted = {(tag_id,) for tag_id in tag_ids}
-        return await self._replace_links(AnimeTag, anime_id, ("tag_id",), wanted)
+        wanted = {
+            anime_id: {(tag_id,) for tag_id in tag_ids}
+            for anime_id, tag_ids in tag_ids_by_anime.items()
+        }
+        return await self._replace_links(AnimeTag, ("tag_id",), wanted)
 
-    async def replace_anime_studios(self, anime_id: int, studio_ids: Iterable[int]) -> bool:
-        wanted = {(studio_id,) for studio_id in studio_ids}
-        return await self._replace_links(AnimeStudio, anime_id, ("studio_id",), wanted)
+    async def replace_anime_studios(self, studio_ids_by_anime: Mapping[int, Iterable[int]]) -> int:
+        wanted = {
+            anime_id: {(studio_id,) for studio_id in studio_ids}
+            for anime_id, studio_ids in studio_ids_by_anime.items()
+        }
+        return await self._replace_links(AnimeStudio, ("studio_id",), wanted)
 
-    async def replace_relations(self, anime_id: int, relations: Iterable[tuple[str, int]]) -> bool:
-        """Make the anime's relations exactly these (relation name, related mal_id) pairs."""
-        wanted = {(relation, related_id) for relation, related_id in relations}
-        return await self._replace_links(
-            AnimeRelation, anime_id, ("relation", "related_mal_id"), wanted
-        )
+    async def replace_relations(
+        self, relations_by_anime: Mapping[int, Iterable[tuple[str, int]]]
+    ) -> int:
+        """Make each anime's relations exactly its (relation name, related mal_id) pairs."""
+        wanted = {
+            anime_id: {(relation, related_id) for relation, related_id in relations}
+            for anime_id, relations in relations_by_anime.items()
+        }
+        return await self._replace_links(AnimeRelation, ("relation", "related_mal_id"), wanted)
 
     # --- one-to-many rows ------------------------------------------------------------------
 
@@ -190,21 +201,32 @@ class CatalogueRepository:
         return written
 
     async def _replace_links(
-        self, model, anime_id: int, columns: tuple[str, ...], wanted: set[tuple]
-    ) -> bool:
-        """Replace an anime's rows in a link table, writing nothing if they already match."""
+        self, model, columns: tuple[str, ...], wanted: dict[int, set[tuple]]
+    ) -> int:
+        """Replace the rows of several anime in a link table; returns how many anime changed.
+
+        One query reads the stored links of all of them, the comparison is done in memory, and
+        only the anime whose links differ are deleted and re-inserted.
+        """
+        if not wanted:
+            return 0
         selected = [getattr(model, c) for c in columns]
-        result = await self.db.execute(select(*selected).where(model.anime_id == anime_id))
-        if {tuple(row) for row in result.all()} == wanted:
-            return False
-        await self.db.execute(delete(model).where(model.anime_id == anime_id))
-        if wanted:
-            await self.db.execute(
-                insert(model).values(
-                    [
-                        {"anime_id": anime_id, **dict(zip(columns, link, strict=True))}
-                        for link in sorted(wanted)
-                    ]
-                )
-            )
-        return True
+        result = await self.db.execute(
+            select(model.anime_id, *selected).where(model.anime_id.in_(list(wanted)))
+        )
+        current: dict[int, set[tuple]] = defaultdict(set)
+        for anime_id, *link in result.all():
+            current[anime_id].add(tuple(link))
+
+        changed = [anime_id for anime_id in wanted if current[anime_id] != wanted[anime_id]]
+        if not changed:
+            return 0
+        await self.db.execute(delete(model).where(model.anime_id.in_(changed)))
+        rows = [
+            {"anime_id": anime_id, **dict(zip(columns, link, strict=True))}
+            for anime_id in changed
+            for link in sorted(wanted[anime_id])
+        ]
+        for start in range(0, len(rows), ROWS_PER_STATEMENT):
+            await self.db.execute(insert(model).values(rows[start : start + ROWS_PER_STATEMENT]))
+        return len(changed)

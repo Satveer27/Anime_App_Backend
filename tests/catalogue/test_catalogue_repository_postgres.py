@@ -266,10 +266,10 @@ async def test_replace_anime_tags_writes_only_when_the_set_changes(pg_session):
     repo = CatalogueRepository(pg_session)
     await repo.upsert_tags([(1, "Action"), (2, "Comedy"), (3, "Drama")])
 
-    assert await repo.replace_anime_tags(1, [1, 2]) is True  # first write
+    assert await repo.replace_anime_tags({1: [1, 2]}) == 1  # first write
     await repo.commit()
-    assert await repo.replace_anime_tags(1, [2, 1, 1]) is False  # same set, any order
-    assert await repo.replace_anime_tags(1, [2, 3]) is True  # changed
+    assert await repo.replace_anime_tags({1: [2, 1, 1]}) == 0  # same set, any order
+    assert await repo.replace_anime_tags({1: [2, 3]}) == 1  # changed
     await repo.commit()
 
     links = (await pg_session.execute(select(AnimeTag.tag_id))).scalars().all()
@@ -280,27 +280,74 @@ async def test_replace_anime_tags_with_an_empty_list_clears_them(pg_session):
     await seed_anime(pg_session)
     repo = CatalogueRepository(pg_session)
     await repo.upsert_tags([(1, "Action")])
-    await repo.replace_anime_tags(1, [1])
+    await repo.replace_anime_tags({1: [1]})
 
-    assert await repo.replace_anime_tags(1, []) is True
+    assert await repo.replace_anime_tags({1: []}) == 1
     await repo.commit()
 
     assert await count(pg_session, AnimeTag) == 0
 
 
-async def test_replacing_one_animes_links_leaves_other_animes_alone(pg_session):
+async def test_an_anime_with_no_links_and_none_wanted_is_unchanged(pg_session):
+    await seed_anime(pg_session)
+
+    assert await CatalogueRepository(pg_session).replace_anime_tags({1: []}) == 0
+
+
+async def test_links_of_several_anime_are_replaced_in_one_call_and_only_the_changed_count(
+    pg_session,
+):
+    for anime_id in (1, 2, 3):
+        await seed_anime(pg_session, anime_id)
+    repo = CatalogueRepository(pg_session)
+    await repo.upsert_tags([(1, "Action"), (2, "Comedy"), (3, "Drama")])
+    await repo.replace_anime_tags({1: [1], 2: [1, 2], 3: [3]})
+    await repo.commit()
+
+    changed = await repo.replace_anime_tags(
+        {
+            1: [1],  # unchanged
+            2: [2],  # lost a tag
+            3: [3, 1],  # gained a tag
+        }
+    )
+    await repo.commit()
+
+    assert changed == 2
+    rows = (await pg_session.execute(select(AnimeTag.anime_id, AnimeTag.tag_id))).all()
+    assert sorted(tuple(r) for r in rows) == [(1, 1), (2, 2), (3, 1), (3, 3)]
+
+
+async def test_replacing_some_animes_links_leaves_other_animes_alone(pg_session):
     await seed_anime(pg_session, 1)
     await seed_anime(pg_session, 2)
     repo = CatalogueRepository(pg_session)
     await repo.upsert_tags([(1, "Action"), (2, "Comedy")])
-    await repo.replace_anime_tags(1, [1])
-    await repo.replace_anime_tags(2, [1, 2])
+    await repo.replace_anime_tags({1: [1], 2: [1, 2]})
 
-    await repo.replace_anime_tags(1, [2])
+    await repo.replace_anime_tags({1: [2]})  # anime 2 is not mentioned
     await repo.commit()
 
     rows = (await pg_session.execute(select(AnimeTag.anime_id, AnimeTag.tag_id))).all()
     assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1), (2, 2)]
+
+
+async def test_replacing_links_with_nothing_wanted_does_nothing(pg_session):
+    assert await CatalogueRepository(pg_session).replace_anime_tags({}) == 0
+
+
+async def test_a_large_batch_of_links_is_written_in_chunks(pg_session):
+    anime_ids = range(1, 201)
+    pg_session.add_all([Anime(mal_id=n, title=f"t{n}") for n in anime_ids])
+    await pg_session.commit()
+    repo = CatalogueRepository(pg_session)
+    await repo.upsert_tags([(t, f"tag {t}") for t in range(1, 11)])
+
+    changed = await repo.replace_anime_tags({n: range(1, 11) for n in anime_ids})  # 2,000 links
+    await repo.commit()
+
+    assert changed == 200
+    assert await count(pg_session, AnimeTag) == 2000
 
 
 async def test_replace_anime_studios_writes_only_when_the_set_changes(pg_session):
@@ -308,9 +355,9 @@ async def test_replace_anime_studios_writes_only_when_the_set_changes(pg_session
     repo = CatalogueRepository(pg_session)
     await repo.upsert_studios([(10, "Madhouse"), (11, "Bones")])
 
-    assert await repo.replace_anime_studios(1, [10]) is True
-    assert await repo.replace_anime_studios(1, [10]) is False
-    assert await repo.replace_anime_studios(1, [10, 11]) is True
+    assert await repo.replace_anime_studios({1: [10]}) == 1
+    assert await repo.replace_anime_studios({1: [10]}) == 0
+    assert await repo.replace_anime_studios({1: [10, 11]}) == 1
     await repo.commit()
 
     assert await count(pg_session, AnimeStudio) == 2
@@ -320,10 +367,10 @@ async def test_replace_relations_needs_no_row_for_the_target_anime(pg_session):
     await seed_anime(pg_session)
     repo = CatalogueRepository(pg_session)
 
-    assert await repo.replace_relations(1, [("Sequel", 500), ("Prequel", 400)]) is True
+    assert await repo.replace_relations({1: [("Sequel", 500), ("Prequel", 400)]}) == 1
     await repo.commit()
-    assert await repo.replace_relations(1, [("Prequel", 400), ("Sequel", 500)]) is False
-    assert await repo.replace_relations(1, [("Sequel", 500)]) is True
+    assert await repo.replace_relations({1: [("Prequel", 400), ("Sequel", 500)]}) == 0
+    assert await repo.replace_relations({1: [("Sequel", 500)]}) == 1
     await repo.commit()
 
     rows = (await pg_session.execute(select(AnimeRelation))).scalars().all()
@@ -335,7 +382,7 @@ async def test_links_for_an_unknown_anime_are_rejected(pg_session):
     await repo.upsert_tags([(1, "Action")])
 
     with pytest.raises(IntegrityError):
-        await repo.replace_anime_tags(99, [1])
+        await repo.replace_anime_tags({99: [1]})
 
 
 # --- statistics, episodes, reviews -------------------------------------------------------------

@@ -5,7 +5,16 @@ import pytest
 from sqlalchemy import func, select
 from structlog.testing import capture_logs
 
-from app.catalogue.models import Anime, AnimeStatisticsMal, Episode, Review
+from app.catalogue.models import (
+    Anime,
+    AnimeStatisticsMal,
+    AnimeStudio,
+    AnimeTag,
+    Episode,
+    Review,
+    Studio,
+    Tag,
+)
 from app.catalogue.repository import CatalogueRepository
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.jobs import clean_raw_job
@@ -79,7 +88,7 @@ def two_complete_anime():
 async def test_a_batch_fills_every_catalogue_table_and_returns_the_cursor(pg_session):
     await seed(pg_session, two_complete_anime())
 
-    result = await make_job(pg_session)._clean_anime(None, None)
+    result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     assert result.next_after == (2, Resource.STATISTICS)  # the last raw row of the batch
     assert result.counts["rows_read"] == 8
@@ -100,7 +109,7 @@ async def test_a_batch_fills_every_catalogue_table_and_returns_the_cursor(pg_ses
 
 
 async def test_an_empty_batch_returns_no_cursor_and_zero_counts(pg_session):
-    result = await make_job(pg_session)._clean_anime(None, None)
+    result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     assert result == BatchResult(None, dict.fromkeys(COUNT_KEYS, 0))
 
@@ -108,9 +117,9 @@ async def test_an_empty_batch_returns_no_cursor_and_zero_counts(pg_session):
 async def test_running_the_same_rows_again_creates_no_duplicates_and_changes_no_anime(pg_session):
     await seed(pg_session, two_complete_anime())
     job = make_job(pg_session)
-    await job._clean_anime(None, None)
+    await job._clean_anime(None, None, {}, {})
 
-    second = await job._clean_anime(None, None)
+    second = await job._clean_anime(None, None, {}, {})
 
     assert second.counts["anime_changed"] == 0  # nothing differs, so nothing was written
     assert await count(pg_session, Anime) == 2
@@ -132,7 +141,7 @@ async def test_rows_of_an_anime_with_no_row_are_skipped_not_crashed_on(pg_sessio
     )
 
     with capture_logs() as logs:
-        result = await make_job(pg_session)._clean_anime(None, None)
+        result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     assert result.counts["skipped_no_anime"] == 3
     assert result.counts["episodes_written"] == 1
@@ -147,11 +156,11 @@ async def test_an_anime_already_in_the_catalogue_still_gets_its_other_rows_when_
     pg_session,
 ):
     await seed(pg_session, [(1, Resource.DETAILS, details(1), 1)])
-    await make_job(pg_session)._clean_anime(None, None)
+    await make_job(pg_session)._clean_anime(None, None, {}, {})
     # a weekly run: statistics were re-fetched later, the details were not
     await seed(pg_session, [(1, Resource.STATISTICS, statistics(77), 20)])
 
-    result = await make_job(pg_session)._clean_anime(None, at(10))
+    result = await make_job(pg_session)._clean_anime(None, at(10), {}, {})
 
     assert result.counts["rows_read"] == 1
     assert result.counts["statistics_written"] == 1
@@ -170,7 +179,7 @@ async def test_an_unparsable_response_is_logged_and_counted_and_the_batch_carrie
     )
 
     with capture_logs() as logs:
-        result = await make_job(pg_session)._clean_anime(None, None)
+        result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     assert result.counts["parse_failed"] == 2
     assert result.counts["anime_changed"] == 1
@@ -188,7 +197,7 @@ async def test_a_resource_with_no_parser_is_skipped_with_a_warning(pg_session):
     )
 
     with capture_logs() as logs:
-        result = await make_job(pg_session)._clean_anime(None, None)
+        result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     assert result.counts["skipped_unsupported"] == 1
     assert any(log["event"] == "clean_resource_unsupported" for log in logs)
@@ -203,7 +212,7 @@ async def test_only_rows_fetched_since_the_cut_off_are_cleaned(pg_session):
         ],
     )
 
-    result = await make_job(pg_session)._clean_anime(None, at(10))
+    result = await make_job(pg_session)._clean_anime(None, at(10), {}, {})
 
     assert result.counts["rows_read"] == 1
     ids = (await pg_session.execute(select(Anime.mal_id))).scalars().all()
@@ -218,7 +227,7 @@ async def test_paging_with_small_batches_cleans_everything_even_when_an_anime_is
 
     after, batches, totals = None, 0, dict.fromkeys(COUNT_KEYS, 0)
     while True:
-        result = await job._clean_anime(after, None, batch_size=3)  # splits every anime
+        result = await job._clean_anime(after, None, {}, {}, batch_size=3)  # splits every anime
         if result.next_after is None:
             break
         after = result.next_after
@@ -243,7 +252,7 @@ async def test_the_text_is_cleaned_on_the_way_in(pg_session):
         ],
     )  # fmt: skip
 
-    await make_job(pg_session)._clean_anime(None, None)
+    await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     anime = (await pg_session.execute(select(Anime))).scalar_one()
     assert (anime.title, anime.synopsis) == ("Fate & Zero", "Story.")
@@ -256,7 +265,7 @@ async def test_each_batch_is_logged_with_its_counts(pg_session):
     await seed(pg_session, two_complete_anime())
 
     with capture_logs() as logs:
-        await make_job(pg_session)._clean_anime(None, None)
+        await make_job(pg_session)._clean_anime(None, None, {}, {})
 
     (done,) = [log for log in logs if log["event"] == "clean_batch_done"]
     assert done["rows_read"] == 8
@@ -277,7 +286,7 @@ async def test_a_database_failure_rolls_the_batch_back_and_is_reraised(mocker):
     job = CleanAnimeJob(catalogue, raw, create_autospec(MetricsRepository, instance=True))
 
     with pytest.raises(RuntimeError, match="db exploded"):
-        await job._clean_anime(None, None)
+        await job._clean_anime(None, None, {}, {})
 
     catalogue.rollback.assert_awaited_once()
     catalogue.commit.assert_not_awaited()
@@ -371,3 +380,177 @@ async def test_a_failed_run_keeps_earlier_batches_and_can_be_resumed(pg_session)
     assert await count(pg_session, Anime) == 2
     assert await count(pg_session, Review) == 4
     assert await count(pg_session, Episode) == 6
+
+
+# --- tags and studios -----------------------------------------------------------------------
+
+
+def named(mal_id: int, name: str) -> dict:
+    return {"mal_id": mal_id, "type": "anime", "name": name, "url": f"https://x/{mal_id}"}
+
+
+ACTION, SCIFI, ADULT, SHOUNEN = (
+    named(1, "Action"),
+    named(24, "Sci-Fi"),
+    named(50, "Adult Cast"),
+    named(27, "Shounen"),
+)
+SUNRISE, BONES = named(14, "Sunrise"), named(4, "Bones")
+
+
+def tagged(mal_id: int, genres=(), themes=(), demographics=(), studios=()) -> tuple:
+    payload = details(
+        mal_id,
+        genres=list(genres),
+        themes=list(themes),
+        demographics=list(demographics),
+        studios=list(studios),
+    )
+    return (mal_id, Resource.DETAILS, payload)
+
+
+async def link_pairs(session, model, column):
+    rows = (await session.execute(select(model.anime_id, getattr(model, column)))).all()
+    return sorted(tuple(row) for row in rows)
+
+
+async def test_tags_studios_and_their_links_are_created(pg_session):
+    await seed(
+        pg_session,
+        [
+            tagged(1, genres=[ACTION, SCIFI], themes=[ADULT], studios=[SUNRISE]),
+            tagged(2, genres=[ACTION], demographics=[SHOUNEN], studios=[SUNRISE, BONES]),
+        ],
+    )
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["tags_upserted"] == 4  # each tag once, although Action is on both anime
+    assert summary["studios_upserted"] == 2
+    assert (summary["tag_links_changed"], summary["studio_links_changed"]) == (2, 2)
+    names = {t.mal_id: t.name for t in (await pg_session.execute(select(Tag))).scalars().all()}
+    assert names == {1: "Action", 24: "Sci-Fi", 50: "Adult Cast", 27: "Shounen"}
+    assert await link_pairs(pg_session, AnimeTag, "tag_id") == [
+        (1, 1),
+        (1, 24),
+        (1, 50),
+        (2, 1),
+        (2, 27),
+    ]
+    assert await link_pairs(pg_session, AnimeStudio, "studio_id") == [(1, 14), (2, 4), (2, 14)]
+    assert await count(pg_session, Studio) == 2
+
+
+async def test_cleaning_the_same_rows_again_changes_no_tags_studios_or_links(pg_session):
+    await seed(pg_session, [tagged(1, genres=[ACTION], studios=[SUNRISE])])
+    await make_job(pg_session).full_clean_loop()
+
+    second = await make_job(pg_session).full_clean_loop()
+
+    assert second["tags_upserted"] == second["studios_upserted"] == 0
+    assert second["tag_links_changed"] == second["studio_links_changed"] == 0
+    assert await count(pg_session, Tag) == 1
+    assert await count(pg_session, AnimeTag) == 1
+
+
+async def test_a_renamed_tag_is_updated_in_place(pg_session):
+    await seed(pg_session, [tagged(1, genres=[named(1, "Action")])])
+    await make_job(pg_session).full_clean_loop()
+    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
+    row.payload = tagged(1, genres=[named(1, "Action & Adventure")])[2]  # MAL renamed tag 1
+    await pg_session.commit()
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["tags_upserted"] == 1
+    assert (await pg_session.execute(select(Tag.name))).scalar_one() == "Action & Adventure"
+    assert await count(pg_session, Tag) == 1
+
+
+async def test_a_tag_the_source_dropped_is_unlinked_but_stays_in_the_tag_table(pg_session):
+    await seed(pg_session, [tagged(1, genres=[ACTION, SCIFI])])
+    await make_job(pg_session).full_clean_loop()
+    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
+    row.payload = tagged(1, genres=[ACTION])[2]
+    await pg_session.commit()
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["tag_links_changed"] == 1
+    assert await link_pairs(pg_session, AnimeTag, "tag_id") == [(1, 1)]
+    assert await count(pg_session, Tag) == 2
+
+
+async def test_an_anime_with_no_studio_gets_no_studio_links(pg_session):
+    await seed(pg_session, [tagged(1, genres=[ACTION], studios=[])])
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["studios_upserted"] == 0
+    assert summary["studio_links_changed"] == 0
+    assert await count(pg_session, AnimeStudio) == 0
+
+
+async def test_an_anime_that_failed_to_parse_gets_no_links(pg_session):
+    broken = {"data": {"mal_id": 1, "genres": [ACTION]}}  # no title
+    await seed(pg_session, [(1, Resource.DETAILS, broken), tagged(2, genres=[ACTION])])
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["parse_failed"] == 1
+    assert await link_pairs(pg_session, AnimeTag, "tag_id") == [(2, 1)]
+
+
+class CountsTheDictLoads(CatalogueRepository):
+    def __init__(self, db):
+        super().__init__(db)
+        self.tag_loads = self.studio_loads = 0
+
+    async def get_tags(self):
+        self.tag_loads += 1
+        return await super().get_tags()
+
+    async def get_studios(self):
+        self.studio_loads += 1
+        return await super().get_studios()
+
+
+async def test_the_tag_and_studio_dicts_are_loaded_once_per_run_not_once_per_batch(pg_session):
+    await seed(pg_session, two_complete_anime())
+    catalogue = CountsTheDictLoads(pg_session)
+    job = CleanAnimeJob(catalogue, RawTenraiRepository(pg_session), MetricsRepository(pg_session))
+
+    summary = await job.full_clean_loop(batch_size=2)
+
+    assert summary["batches"] == 4
+    assert (catalogue.tag_loads, catalogue.studio_loads) == (1, 1)
+
+
+async def test_the_dicts_learn_new_tags_only_after_the_batch_commits(pg_session):
+    await seed(pg_session, [tagged(1, genres=[ACTION], studios=[SUNRISE])])
+    tags, studios = {}, {}
+
+    await make_job(pg_session)._clean_anime(None, None, tags, studios)
+
+    assert tags == {1: "Action"}
+    assert studios == {14: "Sunrise"}
+
+
+async def test_a_batch_that_fails_leaves_the_dicts_and_the_database_unchanged(pg_session):
+    class FailsOnStudioLinks(CatalogueRepository):
+        async def replace_anime_studios(self, studio_ids_by_anime):
+            raise RuntimeError("database went away")
+
+    await seed(pg_session, [tagged(1, genres=[ACTION], studios=[SUNRISE])])
+    job = CleanAnimeJob(
+        FailsOnStudioLinks(pg_session),
+        RawTenraiRepository(pg_session),
+        MetricsRepository(pg_session),
+    )
+    tags, studios = {}, {}
+
+    with pytest.raises(RuntimeError):
+        await job._clean_anime(None, None, tags, studios)
+
+    assert (tags, studios) == ({}, {})  # the dicts never learned tags that were rolled back
+    assert await count(pg_session, Tag) == await count(pg_session, Anime) == 0
