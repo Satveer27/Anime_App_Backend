@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.ingestion.parsers.links import extract_studios, extract_tags
+from app.ingestion.parsers.links import extract_relations, extract_studios, extract_tags
 
 
 def tag(mal_id, name) -> dict:
@@ -121,3 +121,95 @@ def test_every_anime_in_the_probe_sample_has_tags_and_consistent_names():
     assert anime > 0
     assert all(len(found) == 1 for found in tag_names.values())  # an id never has two names
     assert all(len(found) == 1 for found in studio_names.values())
+
+
+def group(relation, *entries) -> dict:
+    return {
+        "relation": relation,
+        "entry": [{"mal_id": i, "type": kind, "name": "x", "url": "u"} for i, kind in entries],
+    }
+
+
+def with_relations(*groups) -> dict:
+    return {"data": {"relations": list(groups)}}
+
+
+def test_relations_keep_only_anime_entries_with_their_relation_name():
+    payload = with_relations(
+        group("Adaptation", (174, "manga")),
+        group("Sequel", (5, "anime"), (6, "anime")),
+        group("Side Story", (7, "anime"), (8, "manga")),
+    )
+
+    assert extract_relations(payload) == [("Sequel", 5), ("Sequel", 6), ("Side Story", 7)]
+
+
+def test_one_related_anime_under_two_relation_names_is_kept_under_both():
+    payload = with_relations(group("Sequel", (5, "anime")), group("Other", (5, "anime")))
+
+    assert extract_relations(payload) == [("Sequel", 5), ("Other", 5)]
+
+
+def test_a_repeated_relation_and_id_is_kept_once():
+    payload = with_relations(
+        group("Sequel", (5, "anime"), (5, "anime")), group("Sequel", (5, "anime"))
+    )
+
+    assert extract_relations(payload) == [("Sequel", 5)]
+
+
+def test_odd_relation_entries_are_skipped():
+    payload = with_relations(
+        {"relation": None, "entry": [{"mal_id": 1, "type": "anime"}]},
+        {"relation": "  ", "entry": [{"mal_id": 2, "type": "anime"}]},
+        {
+            "relation": "Sequel",
+            "entry": [{"mal_id": None, "type": "anime"}, "x", None, {"type": "anime"}],
+        },
+        {"relation": "Prequel", "entry": None},
+        {"relation": "Other"},
+        "x",
+        None,
+        group("Sequel", (9, "anime")),
+    )
+
+    assert extract_relations(payload) == [("Sequel", 9)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        "x",
+        {},
+        {"data": None},
+        {"data": []},
+        {"data": {}},
+        {"data": {"relations": None}},
+        {"data": {"relations": "x"}},
+        {"data": {"relations": []}},
+    ],
+)
+def test_unusable_payloads_have_no_relations(payload):
+    assert extract_relations(payload) == []
+
+
+def test_every_anime_in_the_probe_sample_parses_its_relations():
+    paths = glob.glob("analysis/tenrai_probe/probe_results_*.jsonl")
+    if not paths:
+        pytest.skip("probe samples are not present")
+    edges = anime = 0
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                payload = {"data": record["anime_data"]}
+                relations = extract_relations(payload)
+                assert len(relations) == len(set(relations))
+                assert all(isinstance(i, int) and name for name, i in relations)
+                assert (None, record["anime_id"]) not in relations
+                edges += len(relations)
+                anime += 1
+    assert anime > 0
+    assert edges > 0

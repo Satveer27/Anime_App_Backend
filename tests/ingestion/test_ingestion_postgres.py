@@ -231,3 +231,21 @@ async def test_count_by_status_includes_every_state(pg_session):
     counts = await TaskRepository(pg_session).count_by_status()
 
     assert counts == {"pending": 0, "done": 2, "failed": 1, "dead": 0, "gone": 0}
+
+
+async def test_last_succeeded_run_start_ignores_failed_and_running_runs(pg_session):
+    repo = MetricsRepository(pg_session)
+    assert await repo.last_succeeded_run_start("clean_anime") is None
+
+    done = await repo.start_run("clean_anime")
+    await repo.finish_run(done, RunStatus.SUCCEEDED, {})
+    await repo.commit()
+    first = (await repo.latest_run("clean_anime")).started_at
+    failed = await repo.start_run("clean_anime")
+    await repo.finish_run(failed, RunStatus.FAILED, {}, "boom")
+    await repo.start_run("clean_anime")  # still running
+    await repo.start_run("other_job")
+    await repo.commit()
+
+    assert await repo.last_succeeded_run_start("clean_anime") == first
+    assert await repo.last_succeeded_run_start("other_job") is None

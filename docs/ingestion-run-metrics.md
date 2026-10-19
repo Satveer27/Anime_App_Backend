@@ -29,6 +29,7 @@ Run records use their own database session, so a failure inside the job's work d
 | `discovery_overall` | `DiscoveryJob.run_job_overall`, the whole list, existing tasks untouched |
 | any name you pass, e.g. `discovery_weekly` | `DiscoveryJob.run_job_refresh`, a filtered list that resets known anime to `pending` |
 | `fetch_tasks` | `FetchAnimeJob.fetch_from_tasks`, the worker loop |
+| `clean_anime` | `CleanAnimeJob.full_clean_loop`, raw rows parsed into the catalogue |
 
 ## Discovery runs (`discovery_overall`, and refresh runs)
 
@@ -109,3 +110,32 @@ A stopped run has `status = 'failed'`, `error` set, and `stopped_by` naming the 
 
 ### Reading the numbers for the rate-limit question
 ADR 0012 spaces requests 0.6 s apart (100 a minute). A fetch task makes one request, except episodes, which make one per page, so the whole backfill averages about 1.01 requests per task (`docs/METRICS.md`). If the run is limited only by the rate limiter, expect `tasks_per_minute` to be close to 99. If it is clearly lower and there are few `failed` tasks and no 429s in the logs, latency or the database has become the bottleneck, and `by_resource` shows which Resource is slow. These figures do not show the gap between individual requests; that needs request timestamps in the adapter.
+
+## Clean runs (`clean_anime`)
+
+The clean job reads raw rows in batches of 500 (about 125 anime) and writes the catalogue. Each batch is one transaction. `since` is the start of the last succeeded clean run, so a weekly run only reads rows the fetch job refreshed since then.
+
+| Key | Meaning |
+|---|---|
+| `since` | The cut-off used, as an ISO timestamp, or `null` for a full pass (the first run, or `full_pass=True`). |
+| `batches` | Batches that read at least one row. |
+| `rows_read` | Raw rows read (details, statistics, reviews, episodes). |
+| `anime_changed` | Anime rows inserted or whose data changed. An unchanged anime writes nothing. |
+| `tags_upserted`, `studios_upserted` | New or renamed tags and studios. Near zero after the first batches. |
+| `tag_links_changed`, `studio_links_changed`, `relation_links_changed` | Anime whose tag, studio or relation links were rewritten. This counts anime, not link rows. |
+| `statistics_written`, `episodes_written`, `reviews_written` | Rows written. They are overwritten on every pass, changed or not (reviews keep `updated_at` as "last seen"). |
+| `rows_written` | `anime_changed + tags_upserted + studios_upserted + statistics_written + episodes_written + reviews_written`. The rows written to the catalogue tables, links not included. |
+| `parse_failed` | Details or statistics responses that could not be parsed. Each one is logged as `clean_parse_failed` with its `mal_id`, resource and the start of the response, and is not retried until it is re-fetched or a full pass is run. |
+| `skipped_no_anime` | Statistics, episodes or reviews rows skipped because their anime has no row (its details failed or were never fetched). Logged once per batch with a sample of ids. |
+| `skipped_unsupported` | Rows of a resource with no parser (such as `characters`). |
+| `read_seconds` | Total time reading batches from `raw_tenrai`. |
+| `write_seconds` | Total time parsing, writing and committing the batches. |
+| `elapsed_seconds` | Wall time of the whole run. |
+| `max_batch_seconds` | The slowest batch (read plus write). |
+| `avg_batch_ms` | Average batch time in milliseconds. A batch far above this average is the one to look at. |
+| `rows_read_per_second` | `rows_read / elapsed_seconds`. |
+| `resume_after` | `null` on success. On a failed run, `[mal_id, "resource"]` of the last committed batch: pass `after=(mal_id, Resource("resource"))` to continue from there. |
+
+The per-batch timings are also logged for every batch as `clean_batch_done` (`read_seconds`, `write_seconds` and the counts), so a slow batch can be found by its `last_mal_id`.
+
+`read_seconds` against `write_seconds` says where the time goes: a large `read_seconds` means the keyset query over `raw_tenrai` or the size of the JSON payloads, a large `write_seconds` means the upserts. Compare `rows_written` with `rows_read` to see how much of a pass actually changed anything.

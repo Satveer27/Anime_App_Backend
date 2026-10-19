@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import create_autospec
 
 import pytest
@@ -7,6 +7,7 @@ from structlog.testing import capture_logs
 
 from app.catalogue.models import (
     Anime,
+    AnimeRelation,
     AnimeStatisticsMal,
     AnimeStudio,
     AnimeTag,
@@ -18,7 +19,12 @@ from app.catalogue.models import (
 from app.catalogue.repository import CatalogueRepository
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.jobs import clean_raw_job
-from app.ingestion.jobs.clean_raw_job import COUNT_KEYS, BatchResult, CleanAnimeJob
+from app.ingestion.jobs.clean_raw_job import (
+    COUNT_KEYS,
+    TIMING_KEYS,
+    BatchResult,
+    CleanAnimeJob,
+)
 from app.ingestion.models import RawTenrai
 from app.ingestion.repository.metrics_repository import MetricsRepository
 from app.ingestion.repository.raw_tenrai_repository import RawTenraiRepository
@@ -111,7 +117,9 @@ async def test_a_batch_fills_every_catalogue_table_and_returns_the_cursor(pg_ses
 async def test_an_empty_batch_returns_no_cursor_and_zero_counts(pg_session):
     result = await make_job(pg_session)._clean_anime(None, None, {}, {})
 
-    assert result == BatchResult(None, dict.fromkeys(COUNT_KEYS, 0))
+    assert result == BatchResult(
+        None, dict.fromkeys(COUNT_KEYS, 0) | dict.fromkeys(TIMING_KEYS, 0.0)
+    )
 
 
 async def test_running_the_same_rows_again_creates_no_duplicates_and_changes_no_anime(pg_session):
@@ -225,7 +233,8 @@ async def test_paging_with_small_batches_cleans_everything_even_when_an_anime_is
     await seed(pg_session, two_complete_anime())
     job = make_job(pg_session)
 
-    after, batches, totals = None, 0, dict.fromkeys(COUNT_KEYS, 0)
+    after, batches = None, 0
+    totals = dict.fromkeys(COUNT_KEYS, 0) | dict.fromkeys(TIMING_KEYS, 0.0)
     while True:
         result = await job._clean_anime(after, None, {}, {}, batch_size=3)  # splits every anime
         if result.next_after is None:
@@ -369,12 +378,15 @@ async def test_a_failed_run_keeps_earlier_batches_and_can_be_resumed(pg_session)
         await flaky.full_clean_loop(batch_size=4)  # anime 1 is batch 1, anime 2 is batch 2
 
     (failed,) = [log for log in logs if log["event"] == "clean_run_failed"]
-    assert failed["resume_after"] == (1, Resource.STATISTICS)  # the last committed batch
+    assert failed["resume_after"] == [1, "statistics"]  # the last committed batch
     assert failed["batches"] == 1
     assert await count(pg_session, Anime) == 1  # batch 1 was kept, batch 2 rolled back
     assert await count(pg_session, Review) == 2
 
-    summary = await make_job(pg_session).full_clean_loop(after=failed["resume_after"], batch_size=4)
+    mal_id, resource = failed["resume_after"]
+    summary = await make_job(pg_session).full_clean_loop(
+        after=(mal_id, Resource(resource)), batch_size=4
+    )
 
     assert summary["rows_read"] == 4  # only the rows after the cursor
     assert await count(pg_session, Anime) == 2
@@ -445,7 +457,7 @@ async def test_cleaning_the_same_rows_again_changes_no_tags_studios_or_links(pg_
     await seed(pg_session, [tagged(1, genres=[ACTION], studios=[SUNRISE])])
     await make_job(pg_session).full_clean_loop()
 
-    second = await make_job(pg_session).full_clean_loop()
+    second = await make_job(pg_session).full_clean_loop(full_pass=True)
 
     assert second["tags_upserted"] == second["studios_upserted"] == 0
     assert second["tag_links_changed"] == second["studio_links_changed"] == 0
@@ -460,7 +472,7 @@ async def test_a_renamed_tag_is_updated_in_place(pg_session):
     row.payload = tagged(1, genres=[named(1, "Action & Adventure")])[2]  # MAL renamed tag 1
     await pg_session.commit()
 
-    summary = await make_job(pg_session).full_clean_loop()
+    summary = await make_job(pg_session).full_clean_loop(full_pass=True)
 
     assert summary["tags_upserted"] == 1
     assert (await pg_session.execute(select(Tag.name))).scalar_one() == "Action & Adventure"
@@ -474,7 +486,7 @@ async def test_a_tag_the_source_dropped_is_unlinked_but_stays_in_the_tag_table(p
     row.payload = tagged(1, genres=[ACTION])[2]
     await pg_session.commit()
 
-    summary = await make_job(pg_session).full_clean_loop()
+    summary = await make_job(pg_session).full_clean_loop(full_pass=True)
 
     assert summary["tag_links_changed"] == 1
     assert await link_pairs(pg_session, AnimeTag, "tag_id") == [(1, 1)]
@@ -554,3 +566,232 @@ async def test_a_batch_that_fails_leaves_the_dicts_and_the_database_unchanged(pg
 
     assert (tags, studios) == ({}, {})  # the dicts never learned tags that were rolled back
     assert await count(pg_session, Tag) == await count(pg_session, Anime) == 0
+
+
+# --- relations ------------------------------------------------------------------------------
+
+
+def related(relation: str, *entries: tuple[int, str]) -> dict:
+    return {
+        "relation": relation,
+        "entry": [{"mal_id": mal_id, "type": kind, "name": "x"} for mal_id, kind in entries],
+    }
+
+
+def with_relations(mal_id: int, *groups: dict) -> tuple:
+    return (mal_id, Resource.DETAILS, details(mal_id, relations=list(groups)))
+
+
+async def relation_rows(session):
+    rows = (await session.execute(select(AnimeRelation))).scalars().all()
+    return sorted((r.anime_id, r.relation, r.related_mal_id) for r in rows)
+
+
+async def test_anime_to_anime_relations_are_written_with_the_anime_and_manga_is_left_out(
+    pg_session,
+):
+    await seed(
+        pg_session,
+        [
+            with_relations(
+                1,
+                related("Adaptation", (174, "manga")),
+                related("Sequel", (5, "anime"), (6, "anime")),
+            ),
+            with_relations(2, related("Prequel", (1, "anime"))),
+        ],
+    )
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["relation_links_changed"] == 2
+    assert await relation_rows(pg_session) == [
+        (1, "Sequel", 5),
+        (1, "Sequel", 6),
+        (2, "Prequel", 1),
+    ]
+
+
+async def test_a_relation_to_an_anime_that_is_not_in_the_catalogue_is_kept(pg_session):
+    await seed(pg_session, [with_relations(1, related("Sequel", (99999, "anime")))])
+
+    await make_job(pg_session).full_clean_loop()
+
+    assert await relation_rows(pg_session) == [(1, "Sequel", 99999)]
+
+
+async def test_relations_are_written_in_the_same_batch_as_the_anime_not_after_the_loop(
+    pg_session,
+):
+    # anime 2 is related to anime 1, which is cleaned in the very same batch
+    await seed(
+        pg_session,
+        [
+            with_relations(1, related("Sequel", (2, "anime"))),
+            with_relations(2, related("Prequel", (1, "anime"))),
+        ],
+    )
+
+    await make_job(pg_session)._clean_anime(None, None, {}, {})
+
+    assert await relation_rows(pg_session) == [(1, "Sequel", 2), (2, "Prequel", 1)]
+
+
+async def test_cleaning_the_same_relations_again_changes_nothing_and_a_dropped_one_is_removed(
+    pg_session,
+):
+    await seed(
+        pg_session,
+        [with_relations(1, related("Sequel", (5, "anime")), related("Side Story", (7, "anime")))],
+    )
+    await make_job(pg_session).full_clean_loop()
+
+    unchanged = await make_job(pg_session).full_clean_loop(full_pass=True)
+
+    assert unchanged["relation_links_changed"] == 0
+    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
+    row.payload = with_relations(1, related("Sequel", (5, "anime")))[2]  # MAL dropped one
+    await pg_session.commit()
+
+    changed = await make_job(pg_session).full_clean_loop(full_pass=True)
+
+    assert changed["relation_links_changed"] == 1
+    assert await relation_rows(pg_session) == [(1, "Sequel", 5)]
+
+
+async def test_an_anime_that_failed_to_parse_gets_no_relations(pg_session):
+    broken = {"data": {"mal_id": 1, "relations": [related("Sequel", (5, "anime"))]}}  # no title
+    await seed(pg_session, [(1, Resource.DETAILS, broken)])
+
+    summary = await make_job(pg_session).full_clean_loop()
+
+    assert summary["parse_failed"] == 1
+    assert await relation_rows(pg_session) == []
+
+
+# --- the run record and the cut-off ---------------------------------------------------------
+
+
+async def last_run(session):
+    return await MetricsRepository(session).latest_run("clean_anime")
+
+
+async def test_a_clean_run_is_recorded_with_its_summary(pg_session):
+    await seed(pg_session, two_complete_anime())
+
+    summary = await make_job(pg_session).full_clean_loop(batch_size=3)
+
+    run = await last_run(pg_session)
+    assert run.status.value == "succeeded"
+    assert run.finished_at is not None
+    assert run.error is None
+    assert run.summary["rows_read"] == 8
+    assert run.summary["batches"] == 3
+    assert run.summary["resume_after"] is None
+    assert run.summary == summary
+
+
+async def test_the_summary_totals_the_rows_written_and_the_time_taken(pg_session):
+    await seed(
+        pg_session,
+        [
+            *two_complete_anime(),
+            tagged(3, genres=[ACTION], studios=[SUNRISE]),
+        ],
+    )
+
+    summary = await make_job(pg_session).full_clean_loop(batch_size=3)
+
+    assert summary["rows_written"] == (
+        summary["anime_changed"]
+        + summary["tags_upserted"]
+        + summary["studios_upserted"]
+        + summary["statistics_written"]
+        + summary["episodes_written"]
+        + summary["reviews_written"]
+    )
+    assert (
+        summary["rows_written"] == 3 + 1 + 1 + 2 + 6 + 4
+    )  # anime, tag, studio, stats, eps, reviews
+    assert summary["read_seconds"] >= 0
+    assert summary["write_seconds"] > 0
+    assert summary["elapsed_seconds"] >= summary["read_seconds"] + summary["write_seconds"] - 0.001
+    assert summary["max_batch_seconds"] >= summary["avg_batch_ms"] / 1000 - 0.001  # max >= mean
+    assert summary["rows_read_per_second"] > 0
+
+
+async def test_every_batch_reports_how_long_it_took(pg_session):
+    await seed(pg_session, two_complete_anime())
+
+    result = await make_job(pg_session)._clean_anime(None, None, {}, {})
+
+    assert result.counts["read_seconds"] >= 0
+    assert result.counts["write_seconds"] > 0
+
+
+async def test_a_failed_clean_run_is_recorded_with_where_to_resume(pg_session):
+    await seed(pg_session, two_complete_anime())
+    flaky = CleanAnimeJob(
+        FailsOnItsSecondBatch(pg_session),
+        RawTenraiRepository(pg_session),
+        MetricsRepository(pg_session),
+    )
+
+    with pytest.raises(RuntimeError):
+        await flaky.full_clean_loop(batch_size=4)
+
+    run = await last_run(pg_session)
+    assert run.status.value == "failed"
+    assert run.error == "RuntimeError: database went away"
+    assert run.summary["resume_after"] == [1, "statistics"]
+    assert run.summary["batches"] == 1
+
+
+async def test_by_default_a_run_cleans_only_what_was_fetched_since_the_last_succeeded_run(
+    pg_session,
+):
+    future = datetime.now(UTC) + timedelta(days=1)
+    await seed(pg_session, [(1, Resource.DETAILS, details(1), 1)])
+    first = await make_job(pg_session).full_clean_loop()
+    assert first["since"] is None  # no earlier run: everything
+    pg_session.add(
+        RawTenrai(mal_id=2, resource=Resource.DETAILS, payload=details(2), fetched_at=future)
+    )
+    await pg_session.commit()
+
+    second = await make_job(pg_session).full_clean_loop()
+
+    assert second["since"] is not None
+    assert second["rows_read"] == 1  # only the row fetched after the first run started
+    assert sorted((await pg_session.execute(select(Anime.mal_id))).scalars().all()) == [1, 2]
+
+
+async def test_a_full_pass_ignores_earlier_runs_and_an_explicit_since_overrides_them(pg_session):
+    await seed(
+        pg_session, [(1, Resource.DETAILS, details(1), 1), (2, Resource.DETAILS, details(2), 20)]
+    )
+    await make_job(pg_session).full_clean_loop()
+
+    full = await make_job(pg_session).full_clean_loop(full_pass=True)
+    explicit = await make_job(pg_session).full_clean_loop(since=at(10))
+
+    assert (full["since"], full["rows_read"]) == (None, 2)
+    assert explicit["rows_read"] == 1
+    assert explicit["since"] == at(10).isoformat()
+
+
+async def test_a_failed_run_does_not_move_the_cut_off(pg_session):
+    await seed(pg_session, two_complete_anime())
+    flaky = CleanAnimeJob(
+        FailsOnItsSecondBatch(pg_session),
+        RawTenraiRepository(pg_session),
+        MetricsRepository(pg_session),
+    )
+    with pytest.raises(RuntimeError):
+        await flaky.full_clean_loop(batch_size=4)
+
+    retry = await make_job(pg_session).full_clean_loop(batch_size=4)
+
+    assert retry["since"] is None  # the failed run is not a cut-off
+    assert retry["rows_read"] == 8
+    assert await count(pg_session, Anime) == 2

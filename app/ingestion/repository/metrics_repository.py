@@ -50,5 +50,18 @@ class MetricsRepository:
         )
         return result.scalar_one_or_none()
 
+    async def last_succeeded_run_start(self, job: str) -> datetime | None:
+        """When the newest succeeded run of a job started, or None if it has never succeeded.
+
+        A job that only cares about what changed since it last ran uses this as its cut-off.
+        """
+        result = await self.db.execute(
+            select(IngestionRun.started_at)
+            .where(IngestionRun.job == job, IngestionRun.status == RunStatus.SUCCEEDED)
+            .order_by(IngestionRun.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def commit(self) -> None:
         await self.db.commit()
