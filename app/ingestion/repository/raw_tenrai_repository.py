@@ -1,4 +1,6 @@
-from sqlalchemy import delete, func, select
+from datetime import datetime
+
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +19,34 @@ class RawTenraiRepository:
             select(RawTenrai).where(RawTenrai.mal_id == mal_id, RawTenrai.resource == resource)
         )
         return result.scalar_one_or_none()
+
+    async def get_batch(
+        self,
+        since: datetime | None,
+        after: tuple[int, Resource] | None,
+        limit: int,
+    ) -> list[RawTenrai]:
+        """The next `limit` raw rows in (mal_id, resource) order, for parsing in bulk.
+
+        `since`: only rows fetched at or after this time (None means every row). The caller
+        decides it, e.g. the start of the last successful run, or the first of the month.
+        `after`: the (mal_id, resource) of the last row of the previous batch, or None to start
+        from the beginning. Pass the last row you got back to read the next batch.
+
+        Within an anime the order is details, episodes, reviews, statistics, so `details`
+        always comes before the rows that depend on the anime existing.
+        """
+        stmt = select(RawTenrai).order_by(RawTenrai.mal_id, RawTenrai.resource).limit(limit)
+        if since is not None:
+            stmt = stmt.where(RawTenrai.fetched_at >= since)
+        if after is not None:
+            last_id, last_resource = after
+            stmt = stmt.where(
+                tuple_(RawTenrai.mal_id, RawTenrai.resource)
+                > tuple_(last_id, Resource(last_resource).value)
+            )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
     async def upsert(self, mal_id: int, resource: Resource, payload: dict | list) -> None:
         """Store one response, overwriting the payload and fetched_at if the row exists."""
