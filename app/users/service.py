@@ -56,11 +56,11 @@ class UserService:
     async def _delete_user_and_sessions(self, user: User) -> None:
         """Access tokens first, then refresh tokens, then the account. If Redis is down this fails
         before anything is deleted, instead of deleting the account and leaving its access tokens
-        usable for the rest of their lifetime."""
+        usable for the rest of their lifetime. It does not commit: for one account `get_db` commits
+        at the end of the request, and the bulk delete commits after each user."""
         await revoke_access_to_all_tokens(user.id)
         await self.token_repository.delete_all_refresh_tokens_for_user(user.id)
         await self.user_repository.delete_user(user)
-        await self.user_repository.commit()
 
     async def create_user_service(self, request: UserCreateSchema) -> UserResponseSchema:
         logger.info("signup_attempt", email=request.email)
@@ -500,6 +500,9 @@ class UserService:
                     )
                     not_processed_ids = [str(uid) for uid in user_ids[index:]]
                     break
+                # This user's access tokens are already revoked in Redis, so save the delete now:
+                # a later error must not roll back an account whose tokens are already gone
+                await self.user_repository.commit()
                 deleted_ids.append(str(user_id))
 
         logger.info(
