@@ -587,7 +587,9 @@ class TestDeleteCurrentUserService:
 
         await user_service.delete_current_user_service(user.id)
 
-        assert events == ["revoke", "sessions", "delete", "commit"]
+        assert events == ["revoke", "sessions", "delete"]
+        # the commit is left to get_db at the end of the request
+        mock_user_repository.commit.assert_not_called()
 
     async def test_self_delete_redis_failure_deletes_nothing(
         self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
@@ -857,7 +859,9 @@ class TestDeleteUserByIdService:
 
         await user_service.delete_user_by_id_service(user.id, admin_id=uuid4())
 
-        assert events == ["revoke", "sessions", "delete", "commit"]
+        assert events == ["revoke", "sessions", "delete"]
+        # the commit is left to get_db at the end of the request
+        mock_user_repository.commit.assert_not_called()
 
     async def test_admin_delete_redis_failure_deletes_nothing(
         self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
@@ -942,6 +946,32 @@ class TestDeleteMultipleUsersByIdsService:
         )
 
         assert events == ["revoke", "sessions", "delete", "commit"] * 2
+
+    async def test_a_database_error_keeps_the_users_already_committed(
+        self, user_service, mock_user_repository, mock_token_repository, mocker, make_user
+    ):
+        first, second = make_user(is_admin=False), make_user(is_admin=False)
+        users = {first.id: first, second.id: second}
+
+        async def get_user_by_id(user_id):
+            return users[user_id]
+
+        mock_user_repository.get_user_by_id.side_effect = get_user_by_id
+        events: list[str] = []
+        mock_user_repository.delete_user.side_effect = [None, RuntimeError("db down")]
+        mock_user_repository.commit.side_effect = lambda: events.append("commit")
+        mocker.patch(
+            "app.users.service.revoke_access_to_all_tokens",
+            side_effect=lambda uid: events.append("revoke"),
+        )
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await user_service.delete_multiple_users_by_ids_service(
+                [first.id, second.id], admin_id=uuid4()
+            )
+
+        # the first user was saved before the second was touched
+        assert events == ["revoke", "commit", "revoke"]
 
 
 class TestBulkDeleteRedisOutage:
