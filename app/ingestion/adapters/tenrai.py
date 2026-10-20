@@ -1,15 +1,23 @@
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 
 import httpx
 import structlog
 
-from app.ingestion.exceptions import GoneError, NetworkError, PermanentError, TransientError
+from app.ingestion.exceptions import (
+    AccessDeniedError,
+    GoneError,
+    NetworkError,
+    PermanentError,
+    TransientError,
+)
 from app.ingestion.utils.circuit_breaker import CircuitBreaker
 from app.ingestion.utils.rate_limiter import RateLimiter
 
 log = structlog.get_logger(__name__)
 RETRYABLE_STATUSES = {500, 502, 503, 504}
+ACCESS_DENIED_STATUSES = {401, 403}
 DEFAULT_RETRY_AFTER_S = 30.0
 USER_AGENT = "AnimePlanet https://github.com/Satveer27/Anime_App_Backend"
 
@@ -43,9 +51,14 @@ class TenraiAdapter:
     @staticmethod
     def _retry_after(r: httpx.Response) -> float:
         try:
-            return float(r.headers.get("Retry-After", DEFAULT_RETRY_AFTER_S))
+            seconds = float(r.headers.get("Retry-After", DEFAULT_RETRY_AFTER_S))
         except ValueError:
             return DEFAULT_RETRY_AFTER_S
+        # The header comes from outside: nan, inf and negative values are unusable, and a huge
+        # one would stall the run while it holds the claimed task's lock.
+        if not math.isfinite(seconds) or seconds < 0:
+            return DEFAULT_RETRY_AFTER_S
+        return seconds
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -95,6 +108,11 @@ class TenraiAdapter:
                 else:
                     if r.status_code == 404:
                         raise GoneError(f"404 {endpoint}", status_code=404)
+                    if r.status_code in ACCESS_DENIED_STATUSES:
+                        log.error("tenrai_access_denied", endpoint=endpoint, status=r.status_code)
+                        raise AccessDeniedError(
+                            f"{r.status_code} {endpoint}", status_code=r.status_code
+                        )
                     if r.status_code != 200:
                         raise PermanentError(
                             f"{r.status_code} {endpoint}", status_code=r.status_code

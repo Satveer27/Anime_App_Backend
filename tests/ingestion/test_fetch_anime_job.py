@@ -8,6 +8,7 @@ from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
 from app.ingestion.enums.task_status_enum import TaskStatus
 from app.ingestion.exceptions import (
+    AccessDeniedError,
     CircuitOpenError,
     GoneError,
     PermanentError,
@@ -15,6 +16,7 @@ from app.ingestion.exceptions import (
     TransientError,
 )
 from app.ingestion.jobs.fetch_anime_job import (
+    MAX_CONSECUTIVE_DENIED,
     MAX_CONSECUTIVE_UNEXPECTED,
     MAX_EPISODE_PAGES,
     PROGRESS_EVERY_TASKS,
@@ -199,6 +201,47 @@ async def test_circuit_open_releases_the_task_and_stops_without_using_an_attempt
     task_repo.mark_failed.assert_not_awaited()
     task_repo.mark_dead.assert_not_awaited()
     task_repo.commit.assert_not_awaited()
+
+
+async def test_access_denied_marks_the_task_failed_and_continues(task_repo, raw_repo):
+    adapter = FakeAdapter(full=AccessDeniedError("403 /anime/1/full", status_code=403))
+
+    outcome = await make_job(adapter, task_repo, raw_repo).fetch_job_from_tasks()
+
+    assert outcome.status is TaskStatus.FAILED
+    task_repo.mark_failed.assert_awaited_once()
+    task_repo.mark_dead.assert_not_awaited()
+    task_repo.commit.assert_awaited_once()
+
+
+async def test_repeated_access_denied_stops_the_loop(task_repo, raw_repo, metrics_repo):
+    tasks = [task(i) for i in range(MAX_CONSECUTIVE_DENIED + 5)]
+    adapter = FakeAdapter(full=AccessDeniedError("403", status_code=403))
+    job = loop_job(adapter, task_repo, raw_repo, metrics_repo, tasks)
+
+    with pytest.raises(AccessDeniedError):
+        await job.fetch_from_tasks()
+
+    assert task_repo.mark_failed.await_count == MAX_CONSECUTIVE_DENIED
+    recorded = metrics_repo.finish_run.await_args.args[2]
+    assert recorded["tasks"] == MAX_CONSECUTIVE_DENIED
+    assert recorded["stopped_by"] == "AccessDeniedError"
+
+
+async def test_a_success_resets_the_access_denied_count(task_repo, raw_repo, metrics_repo):
+    class Adapter(FakeAdapter):
+        async def get_full(self, mal_id):
+            if mal_id % MAX_CONSECUTIVE_DENIED == 0:
+                return {"data": {}}
+            raise AccessDeniedError("403", status_code=403)
+
+    tasks = [task(i) for i in range(1, MAX_CONSECUTIVE_DENIED * 3)]
+    job = loop_job(Adapter(), task_repo, raw_repo, metrics_repo, tasks)
+
+    summary = await job.fetch_from_tasks()
+
+    assert summary["tasks"] == len(tasks)
+    assert summary["done"] == 2
 
 
 async def test_database_failure_rolls_back_and_reraises_without_marking(task_repo, raw_repo):

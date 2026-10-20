@@ -14,6 +14,12 @@ class PermanentError(AdapterError):
     """400 or other 4xx: retrying the same request won't help."""
 
 
+class AccessDeniedError(AdapterError):
+    """401 or 403: the source refuses us (a block, a bad User-Agent, a changed key), for every
+    request and not for this one anime. Retrying or marking the task dead would be wrong, so
+    the run stops."""
+
+
 class TransientError(AdapterError):
     """5xx, 429 or network errors that outlasted the quick retries."""
 

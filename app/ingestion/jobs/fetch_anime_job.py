@@ -10,6 +10,7 @@ from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
 from app.ingestion.enums.task_status_enum import TaskStatus
 from app.ingestion.exceptions import (
+    AccessDeniedError,
     CircuitOpenError,
     GoneError,
     PermanentError,
@@ -28,6 +29,8 @@ JOB_NAME = "fetch_tasks"
 MAX_EPISODE_PAGES = 100
 # This many unexpected failures in a row means a bug in our code, not one bad anime.
 MAX_CONSECUTIVE_UNEXPECTED = 10
+# This many 401/403 answers in a row means the source is blocking us, not one odd response.
+MAX_CONSECUTIVE_DENIED = 5
 # A review page can be 240 KB; cap what one log line carries.
 PAYLOAD_LOG_CHARS = 1000
 PROGRESS_EVERY_TASKS = 500
@@ -59,6 +62,7 @@ class FetchAnimeJob:
         self.raw_tenrai_repo = raw_tenrai_repo
         self.metrics_repository = metrics_repository
         self._unexpected_in_a_row = 0
+        self._denied_in_a_row = 0
         self._rate_limited_at_start = 0
         self._requests_at_start = 0
 
@@ -71,6 +75,7 @@ class FetchAnimeJob:
         ends with the number of tasks in each state (`queue_after`).
         """
         self._unexpected_in_a_row = 0
+        self._denied_in_a_row = 0
         # The adapter's counter is cumulative; count only this run's 429s.
         self._rate_limited_at_start = self.tenrai_adapter.rate_limited_count
         self._requests_at_start = self.tenrai_adapter.request_count
@@ -107,6 +112,10 @@ class FetchAnimeJob:
                     )
                 if self._unexpected_in_a_row >= MAX_CONSECUTIVE_UNEXPECTED:
                     raise RepeatedUnexpectedErrors(self._unexpected_in_a_row)
+                if self._denied_in_a_row >= MAX_CONSECUTIVE_DENIED:
+                    raise AccessDeniedError(
+                        f"{self._denied_in_a_row} access denied answers in a row"
+                    )
         except BaseException as exc:
             # Includes Ctrl-C and cancellation. The cause was already logged where it happened;
             # this logs how far the run got.
@@ -149,12 +158,15 @@ class FetchAnimeJob:
             await self.task_repository.mark_done(task)
             status = TaskStatus.DONE
             self._unexpected_in_a_row = 0
+            self._denied_in_a_row = 0
         except GoneError:
             logger.info("task_gone", **key)
+            self._denied_in_a_row = 0
             await self.task_repository.mark_gone(task)
             status = TaskStatus.GONE
         except PermanentError as exc:
             logger.error("task_dead", status_code=exc.status_code, **key)
+            self._denied_in_a_row = 0
             await self.task_repository.mark_dead(task, self._describe(exc))
             status = TaskStatus.DEAD
         except CircuitOpenError:
@@ -162,6 +174,18 @@ class FetchAnimeJob:
             logger.warning("task_released_circuit_open", **key)
             await self.task_repository.rollback()
             raise
+        except AccessDeniedError as exc:
+            # One 401/403 can be a blip, so the task takes an attempt and backs off. The run
+            # stops after MAX_CONSECUTIVE_DENIED in a row (checked by the loop).
+            self._denied_in_a_row += 1
+            logger.error(
+                "task_access_denied",
+                status_code=exc.status_code,
+                consecutive=self._denied_in_a_row,
+                **key,
+            )
+            await self.task_repository.mark_failed(task, self._describe(exc))
+            status = TaskStatus.FAILED
         except TransientError as exc:
             logger.warning("task_failed", status_code=exc.status_code, **key)
             await self.task_repository.mark_failed(task, self._describe(exc))
