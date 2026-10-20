@@ -2,7 +2,6 @@ import httpx
 import pytest
 
 from app.ingestion.adapters.tenrai import TenraiAdapter
-from app.ingestion.circuit_breaker import CircuitBreaker
 from app.ingestion.exceptions import (
     CircuitOpenError,
     GoneError,
@@ -10,6 +9,7 @@ from app.ingestion.exceptions import (
     PermanentError,
     TransientError,
 )
+from app.ingestion.utils.circuit_breaker import CircuitBreaker
 
 OK_BODY = {"data": {"mal_id": 1}}
 
@@ -290,3 +290,23 @@ async def test_failed_probe_reopens_the_breaker():
 def test_rejects_invalid_max_attempts(max_attempts):
     with pytest.raises(ValueError):
         TenraiAdapter(FakeLimiter(), "https://tenrai.test/v1", max_attempts=max_attempts)
+
+
+async def test_list_anime_passes_extra_filters_and_drops_none():
+    h = Harness([ok()])
+
+    await h.adapter.list_anime(page=2, type="tv", status=None)
+
+    params = h.requests[0].url.params
+    assert params["type"] == "tv"
+    assert params["page"] == "2"
+    assert "status" not in params
+    assert "rating" in params
+
+
+async def test_get_statistics_hits_the_statistics_endpoint():
+    h = Harness([ok()])
+
+    await h.adapter.get_statistics(7)
+
+    assert h.requests[0].url.path == "/v1/anime/7/statistics"

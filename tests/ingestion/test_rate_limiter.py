@@ -3,7 +3,7 @@ from itertools import pairwise
 
 import pytest
 
-from app.ingestion.rate_limiter import RateLimiter
+from app.ingestion.utils.rate_limiter import RateLimiter
 
 
 class FakeTime:

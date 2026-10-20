@@ -12,6 +12,8 @@ services:
       - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      # creates the anime_test database on a fresh volume (first start only)
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U anime_user -d anime_database"]
       interval: 5s

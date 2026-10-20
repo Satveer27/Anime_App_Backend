@@ -49,3 +49,6 @@ ignore = [
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "postgres: needs a real Postgres (set TEST_DB_URL); skipped when it is not set",
+]
