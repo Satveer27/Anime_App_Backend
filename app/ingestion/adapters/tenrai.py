@@ -36,6 +36,9 @@ class TenraiAdapter:
         )
         self._breaker = breaker or CircuitBreaker()
         self._sleep = sleep
+        # Cumulative over the adapter's life; jobs report the difference over their run.
+        self.request_count = 0  # HTTP requests sent, retries included
+        self.rate_limited_count = 0
 
     @staticmethod
     def _retry_after(r: httpx.Response) -> float:
@@ -53,6 +56,7 @@ class TenraiAdapter:
 
             try:
                 await self._rate_limiter.acquire()
+                self.request_count += 1
                 r = await self._client.get(endpoint, params=params)
             except httpx.TransportError as e:
                 last_error = type(e).__name__
@@ -72,6 +76,7 @@ class TenraiAdapter:
                     last_status = 429
                     last_was_network = False
                     wait = self._retry_after(r)
+                    self.rate_limited_count += 1
                     log.warning(
                         "tenrai_rate_limited", endpoint=endpoint, wait_s=wait, attempt=attempt
                     )

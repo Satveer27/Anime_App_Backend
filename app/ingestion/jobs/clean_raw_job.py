@@ -128,7 +128,7 @@ class CleanAnimeJob:
                         run_id=run_id,
                         **self._summary(totals, batches, slowest, started, since),
                     )
-        except Exception as exc:
+        except BaseException as exc:  # includes Ctrl-C and cancellation; re-raised below
             # `after` is the last batch that was committed: the place to resume from
             failed = self._summary(totals, batches, slowest, started, since)
             failed["resume_after"] = [after[0], str(after[1])] if after else None

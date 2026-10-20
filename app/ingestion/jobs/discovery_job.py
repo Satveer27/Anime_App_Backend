@@ -92,6 +92,9 @@ class DiscoveryJob:
             "max_list_seconds": 0.0,
         }
         started = time.monotonic()
+        # the adapter's counters are cumulative, so report the difference over this run
+        rate_limited_at_start = self.tenrai_adapter.rate_limited_count
+        requests_at_start = self.tenrai_adapter.request_count
         run_id = await self.metrics_repository.start_run(job_name)
         await self.metrics_repository.commit()
         logger.info(
@@ -142,16 +145,24 @@ class DiscoveryJob:
                 await self.task_repository.commit()
                 summary["db_seconds"] += time.monotonic() - db_started
                 summary["pages"] += 1
+                summary["rate_limited_amount"] = (
+                    self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+                )
+                summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
 
                 if summary["pages"] % PROGRESS_EVERY_PAGES == 0:
                     logger.info(
                         "discovery_progress", run_id=run_id, **self._metrics(summary, started)
                     )
                 page += 1
-        except Exception as exc:
+        except BaseException as exc:  # includes Ctrl-C and cancellation; re-raised below
             failed = self._metrics(summary, started)
             failed["failed_page"] = page
             failed["resume_page"] = page  # nothing of this page was committed
+            failed["rate_limited_amount"] = (
+                self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+            )
+            failed["requests"] = self.tenrai_adapter.request_count - requests_at_start
             logger.exception("discovery_failed", run_id=run_id, job=job_name, **failed)
             await self._record_run(run_id, RunStatus.FAILED, failed, f"{type(exc).__name__}: {exc}")
             raise
@@ -160,6 +171,10 @@ class DiscoveryJob:
             logger.warning("discovery_type_filter_leaked", count=summary["anime_skipped_type"])
         summary = self._metrics(summary, started)
         summary["resume_page"] = None
+        summary["rate_limited_amount"] = (
+            self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+        )
+        summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("discovery_finished", run_id=run_id, job=job_name, **summary)
         return summary
@@ -181,7 +196,7 @@ class DiscoveryJob:
         pages = summary["pages"]
         metrics = dict(summary, elapsed_seconds=elapsed)
         if pages:
-            metrics["requests_per_minute"] = pages / elapsed * 60
+            metrics["requests_per_minute"] = summary["requests"] / elapsed * 60
             metrics["avg_list_ms"] = summary["list_seconds"] / pages * 1000
             metrics["avg_db_ms"] = summary["db_seconds"] / pages * 1000
         return {k: round(v, 3) if isinstance(v, float) else v for k, v in metrics.items()}

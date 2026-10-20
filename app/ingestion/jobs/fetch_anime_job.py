@@ -59,6 +59,8 @@ class FetchAnimeJob:
         self.raw_tenrai_repo = raw_tenrai_repo
         self.metrics_repository = metrics_repository
         self._unexpected_in_a_row = 0
+        self._rate_limited_at_start = 0
+        self._requests_at_start = 0
 
     async def fetch_from_tasks(self) -> dict:
         """Process tasks until none is claimable, recording the run in ingestion_run.
@@ -69,6 +71,9 @@ class FetchAnimeJob:
         ends with the number of tasks in each state (`queue_after`).
         """
         self._unexpected_in_a_row = 0
+        # The adapter's counter is cumulative; count only this run's 429s.
+        self._rate_limited_at_start = self.tenrai_adapter.rate_limited_count
+        self._requests_at_start = self.tenrai_adapter.request_count
         summary = {
             "tasks": 0,
             "done": 0,
@@ -93,6 +98,8 @@ class FetchAnimeJob:
                 if outcome is None:
                     break
                 self._record(summary, outcome, time.monotonic() - task_started)
+                summary["rate_limited_amount"] = self._rate_limited()
+                summary["requests"] = self._requests()
 
                 if summary["tasks"] % PROGRESS_EVERY_TASKS == 0:
                     logger.info(
@@ -100,10 +107,13 @@ class FetchAnimeJob:
                     )
                 if self._unexpected_in_a_row >= MAX_CONSECUTIVE_UNEXPECTED:
                     raise RepeatedUnexpectedErrors(self._unexpected_in_a_row)
-        except Exception as exc:
-            # The cause was already logged where it happened; this logs how far the run got.
+        except BaseException as exc:
+            # Includes Ctrl-C and cancellation. The cause was already logged where it happened;
+            # this logs how far the run got.
             stopped = self._metrics(summary, started)
             stopped["stopped_by"] = type(exc).__name__
+            stopped["rate_limited_amount"] = self._rate_limited()
+            stopped["requests"] = self._requests()
             stopped["queue_after"] = await self._queue_counts()
             logger.error("fetch_run_stopped", run_id=run_id, **stopped)
             await self._record_run(run_id, RunStatus.FAILED, stopped, self._describe(exc))
@@ -112,6 +122,8 @@ class FetchAnimeJob:
         summary = self._metrics(summary, started)
         summary["stopped_by"] = None
         summary["queue_after"] = await self._queue_counts()
+        summary["rate_limited_amount"] = self._rate_limited()
+        summary["requests"] = self._requests()
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("fetch_run_finished", run_id=run_id, **summary)
         return summary
@@ -170,6 +182,12 @@ class FetchAnimeJob:
             await self.task_repository.mark_failed(task, self._describe(exc))
             status = TaskStatus.FAILED
 
+        except BaseException:
+            # Ctrl-C or cancellation: not an attempt, so release the task and let it be re-claimed.
+            logger.exception("task_interrupted", **key)
+            await self.task_repository.rollback()
+            raise
+
         await self.task_repository.commit()
         return TaskOutcome(task.resource, status, first_try)
 
@@ -202,6 +220,12 @@ class FetchAnimeJob:
             page += 1
             if page > MAX_EPISODE_PAGES:
                 raise PermanentError(f"episodes still paging after {MAX_EPISODE_PAGES} pages")
+
+    def _requests(self) -> int:
+        return self.tenrai_adapter.request_count - self._requests_at_start
+
+    def _rate_limited(self) -> int:
+        return self.tenrai_adapter.rate_limited_count - self._rate_limited_at_start
 
     async def _queue_counts(self) -> dict[str, int]:
         """Tasks per state; empty if the database cannot be read."""
@@ -245,6 +269,7 @@ class FetchAnimeJob:
         metrics = dict(summary, elapsed_seconds=elapsed)
         if tasks:
             metrics["tasks_per_minute"] = tasks / elapsed * 60
+            metrics["requests_per_minute"] = summary["requests"] / elapsed * 60
             metrics["avg_task_ms"] = summary["task_seconds"] / tasks * 1000
         metrics["by_resource"] = {
             name: {
