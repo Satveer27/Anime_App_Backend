@@ -37,6 +37,7 @@ class FakeAdapter:
         self.episode_pages_requested = []
         self.rate_limited_count = 0
         self.request_count = 0
+        self.retry_count = 0
 
     def _answer(self, name):
         value = self.responses[name]

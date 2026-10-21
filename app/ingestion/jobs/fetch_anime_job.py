@@ -65,6 +65,7 @@ class FetchAnimeJob:
         self._denied_in_a_row = 0
         self._rate_limited_at_start = 0
         self._requests_at_start = 0
+        self._retries_at_start = 0
 
     async def fetch_from_tasks(self) -> dict:
         """Process tasks until none is claimable, recording the run in ingestion_run.
@@ -79,6 +80,7 @@ class FetchAnimeJob:
         # The adapter's counter is cumulative; count only this run's 429s.
         self._rate_limited_at_start = self.tenrai_adapter.rate_limited_count
         self._requests_at_start = self.tenrai_adapter.request_count
+        self._retries_at_start = self.tenrai_adapter.retry_count
         summary = {
             "tasks": 0,
             "done": 0,
@@ -105,6 +107,7 @@ class FetchAnimeJob:
                 self._record(summary, outcome, time.monotonic() - task_started)
                 summary["rate_limited_amount"] = self._rate_limited()
                 summary["requests"] = self._requests()
+                summary["retries"] = self._retries()
 
                 if summary["tasks"] % PROGRESS_EVERY_TASKS == 0:
                     logger.info(
@@ -123,6 +126,7 @@ class FetchAnimeJob:
             stopped["stopped_by"] = type(exc).__name__
             stopped["rate_limited_amount"] = self._rate_limited()
             stopped["requests"] = self._requests()
+            stopped["retries"] = self._retries()
             stopped["queue_after"] = await self._queue_counts()
             logger.error("fetch_run_stopped", run_id=run_id, **stopped)
             await self._record_run(run_id, RunStatus.FAILED, stopped, self._describe(exc))
@@ -133,6 +137,7 @@ class FetchAnimeJob:
         summary["queue_after"] = await self._queue_counts()
         summary["rate_limited_amount"] = self._rate_limited()
         summary["requests"] = self._requests()
+        summary["retries"] = self._retries()
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("fetch_run_finished", run_id=run_id, **summary)
         return summary
@@ -244,6 +249,9 @@ class FetchAnimeJob:
             page += 1
             if page > MAX_EPISODE_PAGES:
                 raise PermanentError(f"episodes still paging after {MAX_EPISODE_PAGES} pages")
+
+    def _retries(self) -> int:
+        return self.tenrai_adapter.retry_count - self._retries_at_start
 
     def _requests(self) -> int:
         return self.tenrai_adapter.request_count - self._requests_at_start

@@ -46,6 +46,7 @@ class TenraiAdapter:
         self._sleep = sleep
         # Cumulative over the adapter's life; jobs report the difference over their run.
         self.request_count = 0  # HTTP requests sent, retries included
+        self.retry_count = 0  # attempts after the first one of a call
         self.rate_limited_count = 0
 
     @staticmethod
@@ -66,6 +67,8 @@ class TenraiAdapter:
     async def _fetch(self, endpoint: str, params: dict | None = None) -> dict:
         for attempt in range(1, self._max_attempts + 1):
             backoff = 2 ** (attempt - 1)
+            if attempt > 1:
+                self.retry_count += 1
 
             try:
                 await self._rate_limiter.acquire()

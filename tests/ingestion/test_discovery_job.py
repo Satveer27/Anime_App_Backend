@@ -16,6 +16,7 @@ class FakeAdapter:
         self.calls: list[tuple[int, dict]] = []
         self.rate_limited_count = 0
         self.request_count = 0
+        self.retry_count = 0
 
     async def list_anime(self, page: int = 1, **filters):
         self.calls.append((page, filters))

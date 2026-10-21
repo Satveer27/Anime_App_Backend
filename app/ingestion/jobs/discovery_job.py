@@ -95,6 +95,7 @@ class DiscoveryJob:
         # the adapter's counters are cumulative, so report the difference over this run
         rate_limited_at_start = self.tenrai_adapter.rate_limited_count
         requests_at_start = self.tenrai_adapter.request_count
+        retries_at_start = self.tenrai_adapter.retry_count
         run_id = await self.metrics_repository.start_run(job_name)
         await self.metrics_repository.commit()
         logger.info(
@@ -149,6 +150,7 @@ class DiscoveryJob:
                     self.tenrai_adapter.rate_limited_count - rate_limited_at_start
                 )
                 summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
+                summary["retries"] = self.tenrai_adapter.retry_count - retries_at_start
 
                 if summary["pages"] % PROGRESS_EVERY_PAGES == 0:
                     logger.info(
@@ -163,6 +165,7 @@ class DiscoveryJob:
                 self.tenrai_adapter.rate_limited_count - rate_limited_at_start
             )
             failed["requests"] = self.tenrai_adapter.request_count - requests_at_start
+            failed["retries"] = self.tenrai_adapter.retry_count - retries_at_start
             logger.exception("discovery_failed", run_id=run_id, job=job_name, **failed)
             await self._record_run(run_id, RunStatus.FAILED, failed, f"{type(exc).__name__}: {exc}")
             raise
@@ -175,6 +178,7 @@ class DiscoveryJob:
             self.tenrai_adapter.rate_limited_count - rate_limited_at_start
         )
         summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
+        summary["retries"] = self.tenrai_adapter.retry_count - retries_at_start
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("discovery_finished", run_id=run_id, job=job_name, **summary)
         return summary

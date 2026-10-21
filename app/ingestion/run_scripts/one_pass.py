@@ -1,0 +1,147 @@
+"""One full pass: discover every anime, fetch every task, then clean the raw rows.
+
+    uv run --env-file .env.local python -m app.ingestion.run_scripts.one_pass
+
+A rerun resumes by itself: discovery continues from the `resume_page` of its last failed run,
+the clean job from that run's `resume_after`, and the fetch job takes whatever is still
+claimable. `--fresh` ignores the saved positions; `--page` and `--after` set them by hand.
+
+Exit codes: 0 done, 1 unexpected error, 2 bad arguments, 3 Tenrai unreachable (retry later),
+4 blocked or a bug (look at it), 5 database error, 130 interrupted.
+"""
+
+import argparse
+import asyncio
+
+import structlog
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.catalogue.repository import CatalogueRepository
+from app.config import settings
+from app.core.database.database import asyncSessionMaker
+from app.ingestion.adapters.tenrai import TenraiAdapter
+from app.ingestion.enums.resource_enum import Resource
+from app.ingestion.enums.run_status_enum import RunStatus
+from app.ingestion.exceptions import (
+    AccessDeniedError,
+    CircuitOpenError,
+    PermanentError,
+    RepeatedUnexpectedErrors,
+    TransientError,
+)
+from app.ingestion.jobs.clean_raw_job import JOB_NAME as CLEAN_JOB
+from app.ingestion.jobs.clean_raw_job import CleanAnimeJob, Cursor
+from app.ingestion.jobs.discovery_job import JOB_NAME as DISCOVERY_JOB
+from app.ingestion.jobs.discovery_job import DiscoveryJob
+from app.ingestion.jobs.fetch_anime_job import FetchAnimeJob
+from app.ingestion.repository.metrics_repository import MetricsRepository
+from app.ingestion.repository.raw_tenrai_repository import RawTenraiRepository
+from app.ingestion.repository.task_repository import TaskRepository
+from app.ingestion.utils.rate_limiter import RateLimiter
+
+logger = structlog.get_logger(__name__)
+
+EXIT_OK = 0
+EXIT_UNEXPECTED = 1
+EXIT_BAD_ARGUMENTS = 2  # argparse exits with this itself
+EXIT_TENRAI_DOWN = 3
+EXIT_NEEDS_ATTENTION = 4
+EXIT_DATABASE = 5
+EXIT_INTERRUPTED = 130
+
+
+def read_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run one full ingestion pass.")
+    parser.add_argument("--page", type=int, help="discovery page to start from")
+    parser.add_argument("--after", help="clean job cursor to resume after, as MAL_ID:RESOURCE")
+    parser.add_argument(
+        "--fresh", action="store_true", help="ignore the positions saved by failed runs"
+    )
+    args = parser.parse_args(argv)
+    if args.page is not None and args.page < 1:
+        parser.error("--page must be at least 1")
+    args.after = _parse_cursor(parser, args.after) if args.after else None
+    return args
+
+
+def _parse_cursor(parser: argparse.ArgumentParser, value: str) -> Cursor:
+    try:
+        mal_id, resource = value.split(":")
+        return int(mal_id), Resource(resource)
+    except ValueError:
+        parser.error(f"--after must look like 123:statistics, got {value!r}")
+
+
+async def saved_positions(metrics: MetricsRepository) -> tuple[int | None, Cursor | None]:
+    """Where the last failed discovery and clean runs stopped (None if they did not fail)."""
+    page = after = None
+
+    discovery = await metrics.latest_run(DISCOVERY_JOB)
+    if discovery and discovery.status == RunStatus.FAILED and discovery.summary:
+        page = discovery.summary.get("resume_page")
+
+    clean = await metrics.latest_run(CLEAN_JOB)
+    if clean and clean.status == RunStatus.FAILED and clean.summary:
+        saved = clean.summary.get("resume_after")  # stored as [mal_id, resource]
+        if saved:
+            after = (saved[0], Resource(saved[1]))
+    return page, after
+
+
+async def main(args: argparse.Namespace) -> int:
+    adapter = TenraiAdapter(
+        RateLimiter(settings.tenrai_rate_limiter_requests_per_minute),
+        settings.mal_data_base_url,
+    )
+    try:
+        # Two sessions: the run records must survive a rollback in the work session.
+        async with asyncSessionMaker() as session, asyncSessionMaker() as metrics_session:
+            metrics = MetricsRepository(metrics_session)
+            task_repository = TaskRepository(session)
+            raw_repository = RawTenraiRepository(session)
+
+            page, after = (None, None) if args.fresh else await saved_positions(metrics)
+            page = args.page or page or 1
+            after = args.after or after
+            logger.info("one_pass_started", page=page, after=after, fresh=args.fresh)
+
+            discovery = DiscoveryJob(adapter, task_repository, metrics)
+            logger.info("discovery_summary", **await discovery.run_job_overall(page))
+
+            fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics)
+            logger.info("fetch_summary", **await fetch.fetch_from_tasks())
+
+            clean = CleanAnimeJob(CatalogueRepository(session), raw_repository, metrics)
+            logger.info("clean_summary", **await clean.full_clean_loop(after=after, full_pass=True))
+    except (CircuitOpenError, TransientError) as exc:
+        logger.error("one_pass_stopped_tenrai_down", error=type(exc).__name__)
+        return EXIT_TENRAI_DOWN
+    except (AccessDeniedError, PermanentError, RepeatedUnexpectedErrors) as exc:
+        logger.error("one_pass_stopped_needs_attention", error=type(exc).__name__)
+        return EXIT_NEEDS_ATTENTION
+    except SQLAlchemyError as exc:
+        logger.error("one_pass_stopped_database", error=type(exc).__name__)
+        return EXIT_DATABASE
+    except Exception:
+        logger.exception("one_pass_failed")
+        return EXIT_UNEXPECTED
+    finally:
+        await adapter.aclose()
+
+    logger.info("one_pass_finished")
+    return EXIT_OK
+
+
+def run() -> None:
+    args = read_args()
+    try:
+        code = asyncio.run(main(args))
+    except KeyboardInterrupt:
+        # The jobs already recorded the interrupted run and released their task.
+        logger.warning("one_pass_interrupted")
+        code = EXIT_INTERRUPTED
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    run()

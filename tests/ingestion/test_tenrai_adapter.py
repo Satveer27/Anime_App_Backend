@@ -147,6 +147,16 @@ async def test_429_retry_after_uses_the_server_value_unless_unusable(header, exp
     assert h.sleeps == [expected]
 
 
+async def test_counts_requests_and_retries():
+    h = Harness([status(503), status(503), ok(), ok()])
+
+    await h.adapter.get_full(1)
+    await h.adapter.get_full(2)
+
+    assert h.adapter.request_count == 4
+    assert h.adapter.retry_count == 2
+
+
 @pytest.mark.parametrize("code", [500, 502, 503, 504])
 async def test_5xx_is_retried_with_backoff(code):
     h = Harness([status(code), ok()])
