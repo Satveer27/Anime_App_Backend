@@ -1,10 +1,17 @@
 import pytest
+from raw_store_fake import InMemoryRawStore
 from sqlalchemy import func, select
 
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
 from app.ingestion.enums.task_status_enum import TaskStatus
-from app.ingestion.exceptions import CircuitOpenError, GoneError, PermanentError, TransientError
+from app.ingestion.exceptions import (
+    CircuitOpenError,
+    GoneError,
+    PermanentError,
+    RawStoreError,
+    TransientError,
+)
 from app.ingestion.jobs.fetch_anime_job import FetchAnimeJob
 from app.ingestion.models import IngestionTask, RawTenrai
 from app.ingestion.repository.metrics_repository import MetricsRepository
@@ -38,7 +45,7 @@ async def seed(sessionmaker, resource=Resource.DETAILS):
         await s.commit()
 
 
-async def run_once(sessionmaker, adapter):
+async def run_once(sessionmaker, adapter, store=None):
     """One worker pass on its own session, the way a real run would."""
     async with sessionmaker() as session, sessionmaker() as metrics:
         job = FetchAnimeJob(
@@ -46,6 +53,7 @@ async def run_once(sessionmaker, adapter):
             TaskRepository(session),
             RawTenraiRepository(session),
             MetricsRepository(metrics),
+            store or InMemoryRawStore(),
         )
         return await job.fetch_job_from_tasks()
 
@@ -59,27 +67,30 @@ async def state(sessionmaker, resource=Resource.DETAILS):
 
 async def test_success_saves_the_raw_row_and_marks_done_together(pg_sessionmaker):
     await seed(pg_sessionmaker)
+    store = InMemoryRawStore()
 
-    await run_once(pg_sessionmaker, FakeAdapter(full={"data": {"mal_id": 5}}))
+    await run_once(pg_sessionmaker, FakeAdapter(full={"data": {"mal_id": 5}}), store)
 
     task, raw = await state(pg_sessionmaker)
     assert task.status is TaskStatus.DONE
-    assert raw.payload == {"data": {"mal_id": 5}}
+    assert raw.size_bytes > 0
+    assert store.objects[(5, Resource.DETAILS)] == {"data": {"mal_id": 5}}
 
 
-async def test_episode_pages_are_stored_as_a_jsonb_list(pg_sessionmaker):
+async def test_episode_pages_are_stored_as_one_list(pg_sessionmaker):
     await seed(pg_sessionmaker, Resource.EPISODES)
     pages = [
         {"data": [1], "pagination": {"has_next_page": True}},
         {"data": [2], "pagination": {"has_next_page": False}},
     ]
 
-    await run_once(pg_sessionmaker, FakeAdapter(episodes=pages))
+    store = InMemoryRawStore()
+    await run_once(pg_sessionmaker, FakeAdapter(episodes=pages), store)
 
     task, raw = await state(pg_sessionmaker, Resource.EPISODES)
     assert task.status is TaskStatus.DONE
-    assert isinstance(raw.payload, list)
-    assert raw.payload == pages
+    assert raw is not None
+    assert store.objects[(5, Resource.EPISODES)] == pages
 
 
 @pytest.mark.parametrize(
@@ -120,17 +131,33 @@ async def test_circuit_open_leaves_the_task_untouched_and_claimable(pg_sessionma
         assert await TaskRepository(s).claim_next() is not None
 
 
+async def test_a_raw_store_failure_leaves_the_task_claimable_and_no_index_row(pg_sessionmaker):
+    await seed(pg_sessionmaker)
+    store = InMemoryRawStore()
+    store.fail_put = RawStoreError("put failed: AccessDenied")
+
+    with pytest.raises(RawStoreError):
+        await run_once(pg_sessionmaker, FakeAdapter(full={"data": {}}), store)
+
+    task, raw = await state(pg_sessionmaker)
+    assert task.status is TaskStatus.PENDING
+    assert task.attempts == 0
+    assert raw is None
+    async with pg_sessionmaker() as s:  # the row lock was released
+        assert await TaskRepository(s).claim_next() is not None
+
+
 async def test_running_again_after_done_refetches_nothing_and_overwrites_nothing(
     pg_sessionmaker,
 ):
     await seed(pg_sessionmaker)
-    await run_once(pg_sessionmaker, FakeAdapter(full={"v": 1}))
+    store = InMemoryRawStore()
+    await run_once(pg_sessionmaker, FakeAdapter(full={"v": 1}), store)
 
-    result = await run_once(pg_sessionmaker, FakeAdapter(full={"v": 2}))
+    result = await run_once(pg_sessionmaker, FakeAdapter(full={"v": 2}), store)
 
     assert result is None  # nothing claimable
-    _, raw = await state(pg_sessionmaker)
-    assert raw.payload == {"v": 1}
+    assert store.objects[(5, Resource.DETAILS)] == {"v": 1}
     async with pg_sessionmaker() as s:
         count = (await s.execute(select(func.count()).select_from(RawTenrai))).scalar_one()
     assert count == 1
@@ -174,6 +201,7 @@ async def test_the_loop_runs_to_the_end_and_records_the_run_and_the_queue(pg_ses
             TaskRepository(session),
             RawTenraiRepository(session),
             MetricsRepository(metrics),
+            InMemoryRawStore(),
         )
         summary = await job.fetch_from_tasks()
 
@@ -212,6 +240,7 @@ async def test_a_loop_stopped_by_an_open_circuit_is_recorded_as_failed(pg_sessio
             TaskRepository(session),
             RawTenraiRepository(session),
             MetricsRepository(metrics),
+            InMemoryRawStore(),
         )
         with pytest.raises(CircuitOpenError):
             await job.fetch_from_tasks()
@@ -246,6 +275,7 @@ async def test_the_loop_counts_first_try_successes_from_the_attempt_counter(pg_s
             TaskRepository(session),
             RawTenraiRepository(session),
             MetricsRepository(metrics),
+            InMemoryRawStore(),
         )
         summary = await job.fetch_from_tasks()
 

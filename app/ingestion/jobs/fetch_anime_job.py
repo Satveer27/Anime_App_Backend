@@ -14,6 +14,7 @@ from app.ingestion.exceptions import (
     CircuitOpenError,
     GoneError,
     PermanentError,
+    RawStoreError,
     RepeatedUnexpectedErrors,
     TransientError,
 )
@@ -21,6 +22,7 @@ from app.ingestion.models import IngestionTask
 from app.ingestion.repository.metrics_repository import MetricsRepository
 from app.ingestion.repository.raw_tenrai_repository import RawTenraiRepository
 from app.ingestion.repository.task_repository import TaskRepository
+from app.ingestion.storage.raw_store import RawStore
 
 logger = structlog.get_logger(__name__)
 
@@ -45,8 +47,10 @@ class TaskOutcome(NamedTuple):
 class FetchAnimeJob:
     """Claims tasks, fetches each Resource from Tenrai and stores the raw response.
 
-    `task_repository` and `raw_tenrai_repo` must share one session, so the raw row and the
-    task's new state are committed together: a crash between them saves neither.
+    The response goes to S3 first (`raw_store`), then its index row and the task's new state are
+    committed together. `task_repository` and `raw_tenrai_repo` must share one session. A crash
+    after the upload and before the commit leaves an object nobody points at, which the task's
+    next attempt overwrites (ADR 0016).
     `metrics_repository` needs its own session so the run record survives a rollback.
     """
 
@@ -56,11 +60,14 @@ class FetchAnimeJob:
         task_repository: TaskRepository,
         raw_tenrai_repo: RawTenraiRepository,
         metrics_repository: MetricsRepository,
+        raw_store: RawStore,
     ):
         self.tenrai_adapter = tenrai_adapter
         self.task_repository = task_repository
         self.raw_tenrai_repo = raw_tenrai_repo
         self.metrics_repository = metrics_repository
+        self.raw_store = raw_store
+        self._raw_bytes = 0
         self._unexpected_in_a_row = 0
         self._denied_in_a_row = 0
         self._rate_limited_at_start = 0
@@ -77,6 +84,7 @@ class FetchAnimeJob:
         """
         self._unexpected_in_a_row = 0
         self._denied_in_a_row = 0
+        self._raw_bytes = 0
         # The adapter's counter is cumulative; count only this run's 429s.
         self._rate_limited_at_start = self.tenrai_adapter.rate_limited_count
         self._requests_at_start = self.tenrai_adapter.request_count
@@ -108,6 +116,7 @@ class FetchAnimeJob:
                 summary["rate_limited_amount"] = self._rate_limited()
                 summary["requests"] = self._requests()
                 summary["retries"] = self._retries()
+                summary["raw_bytes"] = self._raw_bytes
 
                 if summary["tasks"] % PROGRESS_EVERY_TASKS == 0:
                     logger.info(
@@ -127,6 +136,7 @@ class FetchAnimeJob:
             stopped["rate_limited_amount"] = self._rate_limited()
             stopped["requests"] = self._requests()
             stopped["retries"] = self._retries()
+            stopped["raw_bytes"] = self._raw_bytes
             stopped["queue_after"] = await self._queue_counts()
             logger.error("fetch_run_stopped", run_id=run_id, **stopped)
             await self._record_run(run_id, RunStatus.FAILED, stopped, self._describe(exc))
@@ -138,6 +148,7 @@ class FetchAnimeJob:
         summary["rate_limited_amount"] = self._rate_limited()
         summary["requests"] = self._requests()
         summary["retries"] = self._retries()
+        summary["raw_bytes"] = self._raw_bytes
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("fetch_run_finished", run_id=run_id, **summary)
         return summary
@@ -145,8 +156,8 @@ class FetchAnimeJob:
     async def fetch_job_from_tasks(self) -> TaskOutcome | None:
         """Process the next claimable task and return what happened to it.
 
-        Returns None when no task is claimable. Raises CircuitOpenError (the task stays
-        claimable, no attempt is used) or a database error (after a rollback).
+        Returns None when no task is claimable. Raises CircuitOpenError or RawStoreError (the
+        task stays claimable, no attempt is used) or a database error (after a rollback).
         """
         task = await self.task_repository.claim_next()
         if not task:
@@ -155,10 +166,12 @@ class FetchAnimeJob:
         first_try = task.attempts == 0
         key = {"mal_id": task.mal_id, "resource": task.resource.value}
         seen: list = []  # raw responses fetched for this task, logged if it breaks
+        stored_bytes = 0
         try:
             payload = await self._fetch(task, seen)
+            stored_bytes = await self.raw_store.put(task.mal_id, task.resource, payload)
             await self.raw_tenrai_repo.upsert(
-                mal_id=task.mal_id, resource=task.resource, payload=payload
+                mal_id=task.mal_id, resource=task.resource, size_bytes=stored_bytes
             )
             await self.task_repository.mark_done(task)
             status = TaskStatus.DONE
@@ -177,6 +190,12 @@ class FetchAnimeJob:
         except CircuitOpenError:
             # No request was sent, so this is not an attempt: release the lock and stop.
             logger.warning("task_released_circuit_open", **key)
+            await self.task_repository.rollback()
+            raise
+        except RawStoreError:
+            # The response was fetched but could not be stored. That says nothing about this
+            # anime (bad credentials, S3 down), so release the task without an attempt and stop.
+            logger.error("task_released_raw_store_failed", **key)
             await self.task_repository.rollback()
             raise
         except AccessDeniedError as exc:
@@ -218,6 +237,8 @@ class FetchAnimeJob:
             raise
 
         await self.task_repository.commit()
+        if status is TaskStatus.DONE:
+            self._raw_bytes += stored_bytes  # counted only once committed
         return TaskOutcome(task.resource, status, first_try)
 
     async def _fetch(self, task: IngestionTask, seen: list) -> dict | list[dict]:

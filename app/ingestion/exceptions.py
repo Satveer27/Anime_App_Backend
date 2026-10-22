@@ -36,6 +36,13 @@ class CircuitOpenError(AdapterError):
         self.retry_after_s = retry_after_s
 
 
+class RawStoreError(Exception):
+    """The raw payload store (S3) failed, after the client's own retries, or refused us.
+
+    Not a problem with one anime: the fetch job releases the task and stops the run.
+    """
+
+
 class RepeatedUnexpectedErrors(Exception):
     """Several tasks in a row failed in our own code, so the run stopped instead of burning more."""
 

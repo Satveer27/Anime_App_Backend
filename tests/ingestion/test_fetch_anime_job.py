@@ -1,6 +1,8 @@
+import json
 from unittest.mock import create_autospec
 
 import pytest
+from raw_store_fake import InMemoryRawStore
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
@@ -12,6 +14,7 @@ from app.ingestion.exceptions import (
     CircuitOpenError,
     GoneError,
     PermanentError,
+    RawStoreError,
     RepeatedUnexpectedErrors,
     TransientError,
 )
@@ -79,12 +82,12 @@ def metrics_repo(mocker):
     return repo
 
 
-def make_job(adapter, task_repo, raw_repo, resource=Resource.DETAILS, claim=True):
+def make_job(adapter, task_repo, raw_repo, resource=Resource.DETAILS, claim=True, raw_store=None):
     task_repo.claim_next.return_value = (
         IngestionTask(mal_id=5, resource=resource, attempts=0) if claim else None
     )
     metrics = create_autospec(MetricsRepository, instance=True)
-    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics)
+    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics, raw_store or InMemoryRawStore())
 
 
 @pytest.mark.parametrize(
@@ -103,7 +106,10 @@ async def test_single_page_resources_store_the_response_and_mark_done(
 
     await job.fetch_job_from_tasks()
 
-    raw_repo.upsert.assert_awaited_once_with(mal_id=5, resource=resource, payload=body)
+    assert job.raw_store.objects == {(5, resource): body}
+    raw_repo.upsert.assert_awaited_once_with(
+        mal_id=5, resource=resource, size_bytes=len(json.dumps(body))
+    )
     task_repo.mark_done.assert_awaited_once()
     task_repo.commit.assert_awaited_once()
 
@@ -116,20 +122,22 @@ async def test_episodes_are_stored_as_a_list_of_pages_following_has_next_page(ta
     ]
     adapter = FakeAdapter(episodes=pages)
 
-    await make_job(adapter, task_repo, raw_repo, Resource.EPISODES).fetch_job_from_tasks()
+    job = make_job(adapter, task_repo, raw_repo, Resource.EPISODES)
+    await job.fetch_job_from_tasks()
 
     assert adapter.episode_pages_requested == [1, 2, 3]
-    assert raw_repo.upsert.await_args.kwargs["payload"] == pages  # a list, not a JSON string
+    assert job.raw_store.objects[(5, Resource.EPISODES)] == pages  # a list, not a JSON string
     task_repo.mark_done.assert_awaited_once()
 
 
 async def test_episodes_without_pagination_are_a_single_page(task_repo, raw_repo):
     adapter = FakeAdapter(episodes={"data": []})
 
-    await make_job(adapter, task_repo, raw_repo, Resource.EPISODES).fetch_job_from_tasks()
+    job = make_job(adapter, task_repo, raw_repo, Resource.EPISODES)
+    await job.fetch_job_from_tasks()
 
     assert adapter.episode_pages_requested == [1]
-    assert raw_repo.upsert.await_args.kwargs["payload"] == [{"data": []}]
+    assert job.raw_store.objects[(5, Resource.EPISODES)] == [{"data": []}]
 
 
 async def test_a_failing_episodes_page_stores_nothing_and_marks_failed(task_repo, raw_repo):
@@ -245,6 +253,41 @@ async def test_a_success_resets_the_access_denied_count(task_repo, raw_repo, met
     assert summary["done"] == 2
 
 
+async def test_a_raw_store_failure_releases_the_task_and_stops_without_using_an_attempt(
+    task_repo, raw_repo
+):
+    store = InMemoryRawStore()
+    store.fail_put = RawStoreError("put failed: AccessDenied")
+    job = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo, raw_store=store)
+
+    with pytest.raises(RawStoreError):
+        await job.fetch_job_from_tasks()
+
+    task_repo.rollback.assert_awaited_once()
+    raw_repo.upsert.assert_not_awaited()  # nothing points at an object that was never stored
+    task_repo.mark_failed.assert_not_awaited()
+    task_repo.mark_dead.assert_not_awaited()
+    task_repo.commit.assert_not_awaited()
+
+
+async def test_the_object_is_stored_before_its_index_row_is_written(task_repo, raw_repo):
+    order = []
+    store = InMemoryRawStore()
+    real_put = store.put
+
+    async def put(*args):
+        order.append("put")
+        return await real_put(*args)
+
+    store.put = put
+    raw_repo.upsert.side_effect = lambda **kwargs: order.append("upsert")
+    job = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo, raw_store=store)
+
+    await job.fetch_job_from_tasks()
+
+    assert order == ["put", "upsert"]
+
+
 async def test_database_failure_rolls_back_and_reraises_without_marking(task_repo, raw_repo):
     raw_repo.upsert.side_effect = OperationalError("INSERT", {}, Exception("connection lost"))
     job = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo)
@@ -345,7 +388,7 @@ def loop_job(adapter, task_repo, raw_repo, metrics_repo, tasks):
     """tasks: what claim_next hands out in turn; the list running out means an empty queue."""
     task_repo.claim_next.side_effect = [*tasks, None]
     task_repo.count_by_status.return_value = queue(failed=2, done=len(tasks))
-    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics_repo)
+    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics_repo, InMemoryRawStore())
 
 
 def task(mal_id, resource=Resource.DETAILS):
@@ -371,6 +414,7 @@ async def test_loop_drains_the_queue_and_records_a_succeeded_run(task_repo, raw_
     assert summary["by_resource"]["statistics"]["count"] == 1
     assert summary["stopped_by"] is None
     assert summary["queue_after"] == queue(failed=2, done=3)
+    assert summary["raw_bytes"] == 3 * len(json.dumps({"data": {}}))  # bytes stored
     for key in ("elapsed_seconds", "tasks_per_minute", "avg_task_ms", "max_task_seconds"):
         assert key in summary
     metrics_repo.start_run.assert_awaited_once_with("fetch_tasks")
@@ -520,7 +564,7 @@ async def test_the_summary_counts_the_tasks_that_succeeded_on_the_first_try(
     tasks = [attempt(1, 0), attempt(2, 0), attempt(3, 2), attempt(4, 0)]
     task_repo.claim_next.side_effect = [*tasks, None]
     task_repo.count_by_status.return_value = queue()
-    job = FetchAnimeJob(Adapter(), task_repo, raw_repo, metrics_repo)
+    job = FetchAnimeJob(Adapter(), task_repo, raw_repo, metrics_repo, InMemoryRawStore())
 
     summary = await job.fetch_from_tasks()
 

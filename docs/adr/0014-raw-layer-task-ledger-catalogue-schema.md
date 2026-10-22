@@ -5,7 +5,7 @@ The pipeline stores each source response untouched in a raw table, tracks every 
 ## Decisions
 
 **Raw layer**
-- **One raw table per source.** Tenrai's is `raw_tenrai`, keyed `(mal_id, resource)`, with a `JSONB` `payload` and `fetched_at`. A refresh overwrites the row; there is no history (ADR 0004).
+- **One raw table per source.** Tenrai's is `raw_tenrai`, keyed `(mal_id, resource)`, with a `JSONB` `payload` and `fetched_at`. *(The payload moved to S3 in ADR 0016; the table now only indexes it.)* A refresh overwrites the row; there is no history (ADR 0004).
 - **A raw row exists only for a successful fetch.** There is no `http_status` column, because the outcome of a failed fetch (404, retries exhausted) lives on the task. There is no `source` column either, because the table name is the source.
 - **A multi-page Resource keeps every page in one row** (a list of pages), written once after the last page. If a page fails, nothing is stored and the task is retried from page 1. Only 1-7% of anime have more than one episodes page (ADR 0012).
 - **Rejected: one generic raw table for all sources.** The sources differ in key and shape: Tenrai is keyed by MAL id, AniList by its own id, and IMDb is bulk dumps keyed by `tconst`. A generic table would need a text key and would fit IMDb badly.

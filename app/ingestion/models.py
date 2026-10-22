@@ -68,7 +68,7 @@ class IngestionRun(Base):
 
 
 class RawTenrai(Base):
-    """A Tenrai response stored untouched, one row per (mal_id, resource)."""
+    """Index of a stored Tenrai response, one row per (mal_id, resource); the payload is in S3."""
 
     __tablename__ = "raw_tenrai"
     __table_args__ = (
@@ -80,6 +80,7 @@ class RawTenrai(Base):
         Enum(Resource, native_enum=False, create_constraint=False, values_callable=_enum_values),
         primary_key=True,
     )
-    # Multi-page Resources (episodes) store every page as a list, written once after the last.
-    payload = Column(JSONB, nullable=False)
+    # The response itself is an S3 object keyed by (resource, mal_id) (ADR 0016); this row is its
+    # index. Multi-page Resources (episodes) store every page as a list in that one object.
+    size_bytes = Column(Integer, nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

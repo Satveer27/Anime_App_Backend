@@ -6,9 +6,10 @@ A rerun resumes by itself: discovery continues from the `resume_page` of its las
 the clean job from that run's `resume_after`, and the fetch job takes whatever is still
 claimable. `--fresh` ignores the saved positions; `--page` and `--after` set them by hand.
 
-Exit codes: 0 done, 1 unexpected error, 2 bad arguments, 3 Tenrai unreachable (retry later),
-4 blocked or a bug (look at it), 5 database error, 130 Ctrl-C, 143 stopped by SIGTERM
-(what Airflow sends when it stops a task).
+Exit codes: 0 done, 1 unexpected error, 2 bad arguments or missing configuration (such as
+RAW_S3_BUCKET), 3 Tenrai unreachable (retry later), 4 blocked or a bug (look at it), 5 database
+error, 6 raw store (S3) error, 130 Ctrl-C, 143 stopped by SIGTERM (what Airflow sends when it
+stops a task).
 """
 
 import argparse
@@ -28,6 +29,7 @@ from app.ingestion.exceptions import (
     AccessDeniedError,
     CircuitOpenError,
     PermanentError,
+    RawStoreError,
     RepeatedUnexpectedErrors,
     TransientError,
 )
@@ -39,16 +41,18 @@ from app.ingestion.jobs.fetch_anime_job import FetchAnimeJob
 from app.ingestion.repository.metrics_repository import MetricsRepository
 from app.ingestion.repository.raw_tenrai_repository import RawTenraiRepository
 from app.ingestion.repository.task_repository import TaskRepository
+from app.ingestion.storage.raw_store import RawStore
 from app.ingestion.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
 
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
-EXIT_BAD_ARGUMENTS = 2  # argparse exits with this itself
+EXIT_BAD_ARGUMENTS = 2  # bad arguments (argparse exits with this itself) or missing config
 EXIT_TENRAI_DOWN = 3
 EXIT_NEEDS_ATTENTION = 4
 EXIT_DATABASE = 5
+EXIT_STORAGE = 6
 EXIT_INTERRUPTED = 130
 EXIT_TERMINATED = 143
 
@@ -112,6 +116,13 @@ def _cancel_on_sigterm() -> None:
 
 async def main(args: argparse.Namespace) -> int:
     _cancel_on_sigterm()
+    raw_store = None
+    if args.stage in ("all", "fetch", "clean"):
+        try:
+            raw_store = RawStore.from_settings()
+        except ValueError as exc:  # no bucket configured: say so before any work starts
+            logger.error("one_pass_bad_configuration", error=str(exc))
+            return EXIT_BAD_ARGUMENTS
     adapter = TenraiAdapter(
         RateLimiter(settings.tenrai_rate_limiter_requests_per_minute),
         settings.mal_data_base_url,
@@ -135,11 +146,13 @@ async def main(args: argparse.Namespace) -> int:
                 logger.info("discovery_summary", **await discovery.run_job_overall(page))
 
             if args.stage in ("all", "fetch"):
-                fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics)
+                fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics, raw_store)
                 logger.info("fetch_summary", **await fetch.fetch_from_tasks())
 
             if args.stage in ("all", "clean"):
-                clean = CleanAnimeJob(CatalogueRepository(session), raw_repository, metrics)
+                clean = CleanAnimeJob(
+                    CatalogueRepository(session), raw_repository, metrics, raw_store
+                )
                 logger.info(
                     "clean_summary", **await clean.full_clean_loop(after=after, full_pass=True)
                 )
@@ -152,6 +165,9 @@ async def main(args: argparse.Namespace) -> int:
     except SQLAlchemyError as exc:
         logger.error("one_pass_stopped_database", error=type(exc).__name__)
         return EXIT_DATABASE
+    except RawStoreError as exc:
+        logger.error("one_pass_stopped_raw_store", error=str(exc))
+        return EXIT_STORAGE
     except Exception:
         logger.exception("one_pass_failed")
         return EXIT_UNEXPECTED
