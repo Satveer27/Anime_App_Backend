@@ -1,6 +1,7 @@
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 from alembic import context
 
@@ -39,7 +40,22 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.db_url.replace("asyncpg", "psycopg2"))
+
+def _sync_db_url() -> str:
+    """The app's asyncpg URL as a psycopg2 one, which is what Alembic connects with.
+
+    The two drivers spell the SSL option differently: asyncpg takes `ssl=require`, psycopg2
+    (libpq) takes `sslmode=require`.
+    """
+    url = make_url(settings.db_url).set(drivername="postgresql+psycopg2")
+    query = dict(url.query)
+    if "ssl" in query:
+        query["sslmode"] = query.pop("ssl")
+    return url.set(query=query).render_as_string(hide_password=False)
+
+
+# "%" starts an interpolation in the config file, and a URL-encoded password has plenty of them
+config.set_main_option("sqlalchemy.url", _sync_db_url().replace("%", "%%"))
 
 
 # other values from the config, defined by the needs of env.py,
