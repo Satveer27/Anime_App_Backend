@@ -15,6 +15,10 @@ pytestmark = pytest.mark.postgres
 
 
 class FakeAdapter:
+    request_count = 0
+    retry_count = 0
+    rate_limited_count = 0
+
     def __init__(self, full=None, episodes=None):
         self.full = full
         self.episodes = episodes
@@ -155,6 +159,10 @@ async def test_the_loop_runs_to_the_end_and_records_the_run_and_the_queue(pg_ses
     }
 
     class Adapter:
+        request_count = 0
+        retry_count = 0
+        rate_limited_count = 0
+
         async def get_full(self, mal_id):
             if mal_id in errors:
                 raise errors[mal_id]
@@ -189,6 +197,10 @@ async def test_a_loop_stopped_by_an_open_circuit_is_recorded_as_failed(pg_sessio
         await s.commit()
 
     class Adapter:
+        request_count = 0
+        retry_count = 0
+        rate_limited_count = 0
+
         async def get_full(self, mal_id):
             if mal_id == 2:
                 raise CircuitOpenError(30)
@@ -221,6 +233,10 @@ async def test_the_loop_counts_first_try_successes_from_the_attempt_counter(pg_s
         await s.commit()
 
     class Adapter:
+        request_count = 0
+        retry_count = 0
+        rate_limited_count = 0
+
         async def get_full(self, mal_id):
             return {"data": {"mal_id": mal_id}}
 

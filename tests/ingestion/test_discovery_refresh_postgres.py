@@ -84,6 +84,10 @@ async def test_insert_or_reset_with_no_rows_does_nothing(pg_session):
 
 
 class FakeAdapter:
+    request_count = 0
+    retry_count = 0
+    rate_limited_count = 0
+
     def __init__(self, pages, fail_on=None):
         self.pages = pages
         self.fail_on = fail_on
