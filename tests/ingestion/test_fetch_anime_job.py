@@ -237,6 +237,38 @@ async def test_repeated_access_denied_stops_the_loop(task_repo, raw_repo, metric
     assert recorded["stopped_by"] == "AccessDeniedError"
 
 
+@pytest.mark.parametrize(
+    "other",
+    [
+        TransientError("503", status_code=503),
+        PermanentError("400", status_code=400),
+        GoneError("404", status_code=404),
+        ValueError("a bug of ours"),
+        None,  # a success
+    ],
+    ids=["transient", "permanent", "gone", "unexpected", "success"],
+)
+async def test_any_outcome_between_denials_resets_the_streak(
+    task_repo, raw_repo, metrics_repo, other
+):
+    """Only denials back to back count: 403, other, 403, other ... never reaches the limit."""
+
+    class Adapter(FakeAdapter):
+        async def get_full(self, mal_id):
+            if mal_id % 2:
+                raise AccessDeniedError("403", status_code=403)
+            if other is not None:
+                raise other
+            return {"data": {}}
+
+    tasks = [task(n) for n in range(1, MAX_CONSECUTIVE_DENIED * 4)]
+    job = loop_job(Adapter(), task_repo, raw_repo, metrics_repo, tasks)
+
+    summary = await job.fetch_from_tasks()  # does not raise AccessDeniedError
+
+    assert summary["tasks"] == len(tasks)
+
+
 async def test_a_success_resets_the_access_denied_count(task_repo, raw_repo, metrics_repo):
     class Adapter(FakeAdapter):
         async def get_full(self, mal_id):

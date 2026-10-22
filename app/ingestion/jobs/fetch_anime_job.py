@@ -212,6 +212,7 @@ class FetchAnimeJob:
             status = TaskStatus.FAILED
         except TransientError as exc:
             logger.warning("task_failed", status_code=exc.status_code, **key)
+            self._denied_in_a_row = 0  # only back-to-back denials count
             await self.task_repository.mark_failed(task, self._describe(exc))
             status = TaskStatus.FAILED
         except Exception as exc:
@@ -220,6 +221,7 @@ class FetchAnimeJob:
                 logger.exception("task_aborted_database", **key)
                 await self.task_repository.rollback()
                 raise
+            self._denied_in_a_row = 0  # only back-to-back denials count
             self._unexpected_in_a_row += 1
             logger.exception(
                 "task_failed_unexpected",
