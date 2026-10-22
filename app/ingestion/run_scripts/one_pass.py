@@ -7,11 +7,13 @@ the clean job from that run's `resume_after`, and the fetch job takes whatever i
 claimable. `--fresh` ignores the saved positions; `--page` and `--after` set them by hand.
 
 Exit codes: 0 done, 1 unexpected error, 2 bad arguments, 3 Tenrai unreachable (retry later),
-4 blocked or a bug (look at it), 5 database error, 130 interrupted.
+4 blocked or a bug (look at it), 5 database error, 130 Ctrl-C, 143 stopped by SIGTERM
+(what Airflow sends when it stops a task).
 """
 
 import argparse
 import asyncio
+import signal
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
@@ -48,10 +50,17 @@ EXIT_TENRAI_DOWN = 3
 EXIT_NEEDS_ATTENTION = 4
 EXIT_DATABASE = 5
 EXIT_INTERRUPTED = 130
+EXIT_TERMINATED = 143
 
 
 def read_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one full ingestion pass.")
+    parser.add_argument(
+        "--stage",
+        choices=("all", "discovery", "fetch", "clean"),
+        default="all",
+        help="run one stage (for an Airflow task) or all three in order",
+    )
     parser.add_argument("--page", type=int, help="discovery page to start from")
     parser.add_argument("--after", help="clean job cursor to resume after, as MAL_ID:RESOURCE")
     parser.add_argument(
@@ -88,7 +97,21 @@ async def saved_positions(metrics: MetricsRepository) -> tuple[int | None, Curso
     return page, after
 
 
+def _cancel_on_sigterm() -> None:
+    """Make SIGTERM cancel the running task, so the jobs record the run before the process ends.
+
+    Without this the process dies at once and the run row stays `running` with no resume position.
+    Ctrl-C needs nothing: asyncio.run already cancels the task on SIGINT.
+    """
+    task = asyncio.current_task()
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    except NotImplementedError:
+        pass  # Windows has no loop signal handlers; Airflow runs this on Linux
+
+
 async def main(args: argparse.Namespace) -> int:
+    _cancel_on_sigterm()
     adapter = TenraiAdapter(
         RateLimiter(settings.tenrai_rate_limiter_requests_per_minute),
         settings.mal_data_base_url,
@@ -103,16 +126,23 @@ async def main(args: argparse.Namespace) -> int:
             page, after = (None, None) if args.fresh else await saved_positions(metrics)
             page = args.page or page or 1
             after = args.after or after
-            logger.info("one_pass_started", page=page, after=after, fresh=args.fresh)
+            logger.info(
+                "one_pass_started", stage=args.stage, page=page, after=after, fresh=args.fresh
+            )
 
-            discovery = DiscoveryJob(adapter, task_repository, metrics)
-            logger.info("discovery_summary", **await discovery.run_job_overall(page))
+            if args.stage in ("all", "discovery"):
+                discovery = DiscoveryJob(adapter, task_repository, metrics)
+                logger.info("discovery_summary", **await discovery.run_job_overall(page))
 
-            fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics)
-            logger.info("fetch_summary", **await fetch.fetch_from_tasks())
+            if args.stage in ("all", "fetch"):
+                fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics)
+                logger.info("fetch_summary", **await fetch.fetch_from_tasks())
 
-            clean = CleanAnimeJob(CatalogueRepository(session), raw_repository, metrics)
-            logger.info("clean_summary", **await clean.full_clean_loop(after=after, full_pass=True))
+            if args.stage in ("all", "clean"):
+                clean = CleanAnimeJob(CatalogueRepository(session), raw_repository, metrics)
+                logger.info(
+                    "clean_summary", **await clean.full_clean_loop(after=after, full_pass=True)
+                )
     except (CircuitOpenError, TransientError) as exc:
         logger.error("one_pass_stopped_tenrai_down", error=type(exc).__name__)
         return EXIT_TENRAI_DOWN
@@ -140,6 +170,10 @@ def run() -> None:
         # The jobs already recorded the interrupted run and released their task.
         logger.warning("one_pass_interrupted")
         code = EXIT_INTERRUPTED
+    except asyncio.CancelledError:
+        # SIGTERM: the jobs recorded the run as failed with its resume position
+        logger.warning("one_pass_terminated")
+        code = EXIT_TERMINATED
     raise SystemExit(code)
 
 
