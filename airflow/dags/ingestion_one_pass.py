@@ -6,6 +6,10 @@ stage resume from where its last failed run stopped.
 
 Trigger it by hand ("Trigger DAG w/ config"). Tick `fresh` only to start a new pass over an old
 failed one: it adds --fresh on the first try of each task and never on a retry.
+
+Tick `refresh` to run the whole catalogue again after a finished pass: the discovery task then
+sends every done and failed task back to pending (dead and gone stay) and fetch downloads them
+again. Without it a second run finds nothing to do. Do not tick it while fetch is running.
 """
 
 from datetime import timedelta
@@ -21,10 +25,15 @@ TENRAI_POOL = "tenrai"
 
 
 def stage_command(stage: str) -> str:
-    return (
+    command = (
         f"cd {APP_DIR} && {APP_PYTHON} -m app.ingestion.run_scripts.one_pass --stage {stage}"
         "{% if params.fresh and ti.try_number == 1 %} --fresh{% endif %}"
     )
+    if stage == "discovery":
+        # On every try, not just the first: a crashed refresh resumes from its stored page with
+        # the reset still on, so the pages it had not reached are reset too.
+        command += "{% if params.refresh %} --refresh{% endif %}"
+    return command
 
 
 with DAG(
@@ -32,7 +41,14 @@ with DAG(
     schedule=None,
     catchup=False,
     max_active_runs=1,
-    params={"fresh": Param(False, type="boolean", description="Ignore the saved resume positions")},
+    params={
+        "fresh": Param(False, type="boolean", description="Ignore the saved resume positions"),
+        "refresh": Param(
+            False,
+            type="boolean",
+            description="Send done/failed tasks back to pending so everything is fetched again",
+        ),
+    },
     tags=["ingestion"],
 ) as dag:
     discovery = BashOperator(

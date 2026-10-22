@@ -6,6 +6,10 @@ A rerun resumes by itself: discovery continues from the `resume_page` of its las
 the clean job from that run's `resume_after`, and the fetch job takes whatever is still
 claimable. `--fresh` ignores the saved positions; `--page` and `--after` set them by hand.
 
+`--refresh` is the opposite of a resume: discovery sends the done and failed tasks of every anime
+it lists back to pending, so the next fetch gets them again. It changes what discovery does to
+tasks that already exist; `--fresh` only changes where a run starts.
+
 Exit codes: 0 done, 1 unexpected error, 2 bad arguments or missing configuration (such as
 RAW_S3_BUCKET), 3 Tenrai unreachable (retry later), 4 blocked or a bug (look at it), 5 database
 error, 6 raw store (S3) error, 130 Ctrl-C, 143 stopped by SIGTERM (what Airflow sends when it
@@ -46,6 +50,10 @@ from app.ingestion.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
 
+# Discovery runs are recorded under this name when --refresh is used, so a refresh and the
+# first pass keep separate resume positions.
+REFRESH_JOB = "discovery_refresh"
+
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
 EXIT_BAD_ARGUMENTS = 2  # bad arguments (argparse exits with this itself) or missing config
@@ -70,9 +78,18 @@ def read_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--fresh", action="store_true", help="ignore the positions saved by failed runs"
     )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="discovery sends the done and failed tasks of the anime it lists back to pending, "
+        "so they are fetched again (dead and gone stay). Only for a deliberate refresh: "
+        "without it, discovery leaves existing tasks alone and a rerun resumes",
+    )
     args = parser.parse_args(argv)
     if args.page is not None and args.page < 1:
         parser.error("--page must be at least 1")
+    if args.refresh and args.stage not in ("all", "discovery"):
+        parser.error("--refresh only applies to the discovery stage")
     args.after = _parse_cursor(parser, args.after) if args.after else None
     return args
 
@@ -85,11 +102,18 @@ def _parse_cursor(parser: argparse.ArgumentParser, value: str) -> Cursor:
         parser.error(f"--after must look like 123:statistics, got {value!r}")
 
 
-async def saved_positions(metrics: MetricsRepository) -> tuple[int | None, Cursor | None]:
+def discovery_job_name(args: argparse.Namespace) -> str:
+    """The name discovery's runs are recorded under, which is also where its resume page is read."""
+    return REFRESH_JOB if args.refresh else DISCOVERY_JOB
+
+
+async def saved_positions(
+    metrics: MetricsRepository, discovery_job: str = DISCOVERY_JOB
+) -> tuple[int | None, Cursor | None]:
     """Where the last failed discovery and clean runs stopped (None if they did not fail)."""
     page = after = None
 
-    discovery = await metrics.latest_run(DISCOVERY_JOB)
+    discovery = await metrics.latest_run(discovery_job)
     if discovery and discovery.status == RunStatus.FAILED and discovery.summary:
         page = discovery.summary.get("resume_page")
 
@@ -134,16 +158,31 @@ async def main(args: argparse.Namespace) -> int:
             task_repository = TaskRepository(session)
             raw_repository = RawTenraiRepository(session)
 
-            page, after = (None, None) if args.fresh else await saved_positions(metrics)
+            if args.fresh:
+                page, after = None, None
+            else:
+                page, after = await saved_positions(metrics, discovery_job_name(args))
             page = args.page or page or 1
             after = args.after or after
             logger.info(
-                "one_pass_started", stage=args.stage, page=page, after=after, fresh=args.fresh
+                "one_pass_started",
+                stage=args.stage,
+                page=page,
+                after=after,
+                fresh=args.fresh,
+                refresh=args.refresh,
             )
 
             if args.stage in ("all", "discovery"):
                 discovery = DiscoveryJob(adapter, task_repository, metrics)
-                logger.info("discovery_summary", **await discovery.run_job_overall(page))
+                if args.refresh:
+                    # A crashed refresh resumes from its stored page with the reset still on, so
+                    # the pages not reached yet are reset too (ADR 0004: no score history, so a
+                    # refresh is a refetch). Run it before fetch starts, never during it.
+                    summary = await discovery.run_job_refresh(REFRESH_JOB, {}, page=page)
+                else:
+                    summary = await discovery.run_job_overall(page)
+                logger.info("discovery_summary", **summary)
 
             if args.stage in ("all", "fetch"):
                 fetch = FetchAnimeJob(adapter, task_repository, raw_repository, metrics, raw_store)
