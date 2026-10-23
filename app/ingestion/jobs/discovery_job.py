@@ -126,7 +126,7 @@ class DiscoveryJob:
 
         1. `recent_years`: anime that started in last year or later (`start_date` is a lower
            bound if Tenrai reads it like the API it replaced; confirm with a probe).
-        2. `popular`: the first POPULAR_PAGES pages of the list ordered by members, most
+        2. `popular`: the first POPULAR_PAGES pages of the list ordered by popularity (rank 1 first), most
            followed first, which is POPULAR_ANIME anime.
 
         Only details, statistics and reviews are fetched. Each list is recorded under its own
@@ -137,7 +137,7 @@ class DiscoveryJob:
         last_year = datetime.now(UTC).year - 1
         lists = {
             "recent_years": ({"start_date": str(last_year)}, None),
-            "popular": ({"order_by": "members", "sort": "desc"}, POPULAR_PAGES),
+            "popular": ({"order_by": "popularity", "sort": "asc"}, POPULAR_PAGES),
         }
         summary = {}
         for key, (filters, max_pages) in lists.items():

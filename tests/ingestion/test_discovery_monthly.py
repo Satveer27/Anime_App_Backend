@@ -16,7 +16,7 @@ from app.ingestion.repository.task_repository import TaskRepository
 
 
 class Adapter:
-    """The year list ends after `year_pages` pages; the members-ordered list never ends."""
+    """The year list ends after `year_pages` pages; the popularity-ordered list never ends."""
 
     request_count = 0
     retry_count = 0
@@ -28,7 +28,7 @@ class Adapter:
         self.calls: list[tuple[str, int, dict]] = []
 
     async def list_anime(self, page=1, **filters):
-        popular = filters.get("order_by") == "members"
+        popular = filters.get("order_by") == "popularity"
         self.calls.append(("popular" if popular else "years", page, filters))
         if popular:
             more = page != self.popular_ends_at
@@ -59,7 +59,7 @@ def failed_run(resume_page):
     return SimpleNamespace(status=RunStatus.FAILED, summary={"resume_page": resume_page})
 
 
-async def test_it_asks_for_last_year_onwards_then_the_most_followed(task_repo, metrics_repo):
+async def test_it_asks_for_last_year_onwards_then_the_most_popular(task_repo, metrics_repo):
     adapter = Adapter()
 
     await DiscoveryJob(adapter, task_repo, metrics_repo).run_job_monthly()
@@ -68,13 +68,13 @@ async def test_it_asks_for_last_year_onwards_then_the_most_followed(task_repo, m
     year_filters = adapter.calls[0][2]
     popular_filters = [f for name, _, f in adapter.calls if name == "popular"][0]
     assert year_filters["start_date"] == last_year
-    assert (popular_filters["order_by"], popular_filters["sort"]) == ("members", "desc")
+    assert (popular_filters["order_by"], popular_filters["sort"]) == ("popularity", "asc")
 
 
 async def test_the_popular_list_stops_after_the_page_cap_though_tenrai_has_more(
     task_repo, metrics_repo
 ):
-    adapter = Adapter()  # the members list claims a next page forever
+    adapter = Adapter()  # the popularity list claims a next page forever
 
     await DiscoveryJob(adapter, task_repo, metrics_repo).run_job_monthly()
 
