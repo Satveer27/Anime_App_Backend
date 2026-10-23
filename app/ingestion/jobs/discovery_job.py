@@ -2,6 +2,7 @@ import time
 
 import structlog
 
+from app.catalogue.repository import CatalogueRepository
 from app.ingestion.adapters.tenrai import TenraiAdapter
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
@@ -23,6 +24,13 @@ LIST_TYPES = "tv,movie,ova,special,ona,tv_special"
 EXCLUDED_TYPES = {"Music", "CM", "PV"}
 PROGRESS_EVERY_PAGES = 25
 JOB_NAME = "discovery_overall"
+WEEKLY_JOB_NAME = "discovery_weekly"
+# The Active tier (CONTEXT.md) is asked of Tenrai with these two words, one list each...
+WEEKLY_LIST_STATUSES = ("airing", "upcoming")
+# ...but the catalogue stores MAL's own wording, which is what the database step looks up.
+ACTIVE_CATALOGUE_STATUSES = ("Currently Airing", "Not yet aired")
+# One insert statement binds two values per task and Postgres allows 32,767 bound values.
+TASKS_PER_STATEMENT = 5000
 
 
 class DiscoveryJob:
@@ -31,11 +39,14 @@ class DiscoveryJob:
         tenrai_adapter: TenraiAdapter,
         task_repository: TaskRepository,
         metrics_repository: MetricsRepository,
+        catalogue_repository: CatalogueRepository | None = None,
     ):
         self.tenrai_adapter = tenrai_adapter
         self.task_repository = task_repository
         # Must use its own session so the run record survives a failure in the task session.
         self.metrics_repository = metrics_repository
+        # Only the weekly run reads the catalogue; it shares the task repository's session.
+        self.catalogue_repository = catalogue_repository
 
     async def run_job_overall(self, page: int = 1) -> dict:
         """Page through Tenrai's whole anime list and create the missing tasks.
@@ -61,6 +72,63 @@ class DiscoveryJob:
         the worker has already finished back to pending.
         """
         return await self._run(job_name, page, filters, resources, reset_existing=True)
+
+    async def run_job_weekly(
+        self,
+        job_name: str = WEEKLY_JOB_NAME,
+        resources: tuple[Resource, ...] = DISCOVERY_RESOURCES,
+    ) -> dict:
+        """The weekly refresh of the Active tier: reset the tasks of every anime that is live.
+
+        1. Tenrai's `airing` list, then its `upcoming` list: new anime get their tasks, known
+           ones have their `done` and `failed` tasks sent back to `pending`.
+        2. Every anime the catalogue holds as airing or not yet aired, which includes the ones
+           that finished since the last run and so no longer show up in Tenrai's lists. Their
+           final episodes and score are fetched once more.
+
+        Each list is recorded under its own name (`{job_name}_airing`, `{job_name}_upcoming`)
+        and resumes from its own last failed run, so a retry never starts one list at the
+        other's page. Run it before the fetch worker starts, not during a worker run.
+        Returns the summary of each step.
+        """
+        if self.catalogue_repository is None:
+            raise ValueError("run_job_weekly needs a catalogue repository")
+
+        summary = {}
+        for status in WEEKLY_LIST_STATUSES:
+            name = f"{job_name}_{status}"
+            summary[status] = await self._run(
+                name,
+                await self._resume_page(name),
+                {"status": status},
+                resources,
+                reset_existing=True,
+            )
+        summary["catalogue"] = await self._reset_active_from_catalogue(resources)
+        return summary
+
+    async def _resume_page(self, job_name: str) -> int:
+        """Where this job's last run stopped, or 1 if it did not fail."""
+        last = await self.metrics_repository.latest_run(job_name)
+        if last and last.status == RunStatus.FAILED and last.summary:
+            return last.summary.get("resume_page") or 1
+        return 1
+
+    async def _reset_active_from_catalogue(self, resources: tuple[Resource, ...]) -> dict:
+        """Send the tasks of every anime stored as airing or not yet aired back to pending."""
+        ids = await self.catalogue_repository.anime_ids_with_status(ACTIVE_CATALOGUE_STATUSES)
+        rows = [(mal_id, resource) for mal_id in sorted(ids) for resource in resources]
+        inserted = reset = 0
+        for start in range(0, len(rows), TASKS_PER_STATEMENT):
+            new, again = await self.task_repository.insert_or_reset_tasks(
+                rows[start : start + TASKS_PER_STATEMENT]
+            )
+            inserted += new
+            reset += again
+        await self.task_repository.commit()
+        result = {"anime": len(ids), "tasks_inserted": inserted, "tasks_reset": reset}
+        logger.info("discovery_weekly_catalogue_reset", **result)
+        return result
 
     async def _run(
         self,
