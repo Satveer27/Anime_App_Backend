@@ -1,4 +1,6 @@
+import math
 import time
+from datetime import UTC, datetime
 
 import structlog
 
@@ -25,6 +27,14 @@ EXCLUDED_TYPES = {"Music", "CM", "PV"}
 PROGRESS_EVERY_PAGES = 25
 JOB_NAME = "discovery_overall"
 WEEKLY_JOB_NAME = "discovery_weekly"
+MONTHLY_JOB_NAME = "discovery_monthly"
+# The monthly refresh covers the most popular anime, one list page at a time. A list page holds
+# 100 anime (TenraiAdapter.list_anime's default limit), so 500 anime are 5 pages.
+POPULAR_ANIME = 500
+LIST_PAGE_SIZE = 100
+POPULAR_PAGES = math.ceil(POPULAR_ANIME / LIST_PAGE_SIZE)
+# ADR 0004: the monthly refresh skips episodes, which the weekly Active tier keeps current.
+MONTHLY_RESOURCES = (Resource.DETAILS, Resource.STATISTICS, Resource.REVIEWS)
 # The Active tier (CONTEXT.md) is asked of Tenrai with these two words, one list each...
 WEEKLY_LIST_STATUSES = ("airing", "upcoming")
 # ...but the catalogue stores MAL's own wording, which is what the database step looks up.
@@ -107,6 +117,41 @@ class DiscoveryJob:
         summary["catalogue"] = await self._reset_active_from_catalogue(resources)
         return summary
 
+    async def run_job_monthly(
+        self,
+        job_name: str = MONTHLY_JOB_NAME,
+        resources: tuple[Resource, ...] = MONTHLY_RESOURCES,
+    ) -> dict:
+        """The monthly refresh (ADR 0004): last year's and this year's anime, then the top ones.
+
+        1. `recent_years`: anime that started in last year or later (`start_date` is a lower
+           bound if Tenrai reads it like the API it replaced; confirm with a probe).
+        2. `popular`: the first POPULAR_PAGES pages of the list ordered by members, most
+           followed first, which is POPULAR_ANIME anime.
+
+        Only details, statistics and reviews are fetched. Each list is recorded under its own
+        name (`{job_name}_recent_years`, `{job_name}_popular`) and resumes from its own last
+        failed run. Run it before the fetch worker starts, not during a worker run.
+        Returns the summary of each list.
+        """
+        last_year = datetime.now(UTC).year - 1
+        lists = {
+            "recent_years": ({"start_date": str(last_year)}, None),
+            "popular": ({"order_by": "members", "sort": "desc"}, POPULAR_PAGES),
+        }
+        summary = {}
+        for key, (filters, max_pages) in lists.items():
+            name = f"{job_name}_{key}"
+            summary[key] = await self._run(
+                name,
+                await self._resume_page(name),
+                filters,
+                resources,
+                reset_existing=True,
+                max_pages=max_pages,
+            )
+        return summary
+
     async def _resume_page(self, job_name: str) -> int:
         """Where this job's last run stopped, or 1 if it did not fail."""
         last = await self.metrics_repository.latest_run(job_name)
@@ -137,8 +182,12 @@ class DiscoveryJob:
         filters: dict,
         resources: tuple[Resource, ...],
         reset_existing: bool,
+        max_pages: int | None = None,
     ) -> dict:
         """The paging loop shared by the overall and refresh runs.
+
+        `max_pages` stops after that page number even if Tenrai has more (for "the top N"). It
+        counts page numbers, so a run resumed at page 4 of 5 fetches pages 4 and 5.
 
         Commits once per page. A failed page stops the job and re-raises: everything before it
         is already saved. The run and its metrics are recorded in ingestion_run, whether it
@@ -184,6 +233,8 @@ class DiscoveryJob:
                 summary["max_list_seconds"] = max(summary["max_list_seconds"], list_elapsed)
                 pagination = result.get("pagination") or {}
                 has_next = bool(pagination.get("has_next_page"))
+                if max_pages and page >= max_pages:
+                    has_next = False
 
                 rows = []
                 for anime in result.get("data") or []:
