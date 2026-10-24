@@ -19,8 +19,9 @@ from airflow.sdk import DAG, Param
 
 APP_DIR = "/opt/app"
 APP_PYTHON = "/opt/app-venv/bin/python"
-# One slot (created by airflow-init): discovery and fetch call Tenrai and must never overlap,
-# because the rate limiter lives in memory (ADR 0012).
+# One slot (created by airflow-init). Discovery and fetch call Tenrai and must never overlap,
+# because the rate limiter lives in memory (ADR 0012). Clean takes the same slot so that two
+# cleans never write the catalogue at once and none runs while a fetch is still adding rows.
 TENRAI_POOL = "tenrai"
 
 
@@ -70,6 +71,7 @@ with DAG(
     clean = BashOperator(
         task_id="clean",
         bash_command=stage_command("clean"),
+        pool=TENRAI_POOL,  # the one lane for the whole pipeline: no two cleans, none during a fetch
         retries=2,
         retry_delay=timedelta(minutes=5),
         execution_timeout=timedelta(hours=4),

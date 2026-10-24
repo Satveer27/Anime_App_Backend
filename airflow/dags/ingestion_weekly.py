@@ -54,6 +54,7 @@ with DAG(
     clean = BashOperator(
         task_id="clean",
         bash_command=stage_command("clean"),
+        pool=TENRAI_POOL,  # the one lane for the whole pipeline: no two cleans, none during a fetch
         retries=2,
         retry_delay=timedelta(minutes=5),
         execution_timeout=timedelta(hours=2),
