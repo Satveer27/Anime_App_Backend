@@ -241,3 +241,47 @@ Two list pages with `type=tv,movie,ova,special,ona,tv_special`: 200 anime seen, 
 - *The size is after this test's bulk updates; the same index built when 95% of the tasks were done was 208 kB.
 - The worker waits about 0.6 s per task for the rate limiter, so a claim of 30 ms most likely fits inside that wait and does not slow the backfill. Not measured on a real run.
 
+
+## 4. Clean job batch size, per-row versus batched writes (issue #25), 24 Oct 2026
+
+**Question.** The clean job reads `batch_size` raw rows, parses them, writes them with bulk statements and commits. How much does the batch size matter, and where do the gains stop?
+
+**Method.** `analysis/bench_clean_batch_size.py` runs the real `CleanAnimeJob.full_clean_loop(full_pass=True)` over a fixed sample of **500 anime = 2,000 raw rows** (500 per resource; anime chosen by `md5(mal_id)` order, so the sample is repeatable; 11.1 MB of JSON), at batch sizes 1, 10, 50, 100, 250, 500 and 1000. The responses are loaded into memory first, so S3 is not part of the timing. All writes go to **temporary tables** that shadow the real ones on one pinned connection, so nothing in the real catalogue changed. Statements are counted with SQLAlchemy's `before_cursor_execute` event and commits with its `commit` event. Every run produced the same rows (500 anime, 2,219 episodes, 1,858 reviews, 0 parse failures), so the runs did identical work. One run per cell, on RDS and locally; not repeated, except the temporary-versus-real comparison below (four runs each).
+
+### Against RDS (db.t4g.micro, London, from the developer's laptop; round trip 16.6 ms median)
+| Batch size | Statements | Commits | Statements per row | Round trips per row | Seconds | ms per row |
+|---|---|---|---|---|---|---|
+| 1 | 8,900 | 2,000 | 4.450 | 5.450 | 228.8 | 114.4 |
+| 10 | 2,898 | 200 | 1.449 | 1.549 | 64.4 | 32.2 |
+| 50 | 654 | 40 | 0.327 | 0.347 | 21.2 | 10.6 |
+| 100 | 336 | 20 | 0.168 | 0.178 | 15.3 | 7.7 |
+| 250 | 140 | 8 | 0.070 | 0.074 | 9.0 | 4.5 |
+| **500** | 74 | 4 | **0.037** | 0.039 | 4.8 | **2.4** |
+| 1000 | 45 | 2 | 0.022 | 0.024 | 3.8 | 1.9 |
+
+### Against local Postgres 16 (Docker; round trip 1.0 ms)
+| Batch size | Statements per row | ms per row |
+|---|---|---|
+| 1 | 4.450 | 14.8 |
+| 10 | 1.449 | 6.1 |
+| 50 | 0.327 | 3.5 |
+| 100 | 0.168 | 2.9 |
+| 250 | 0.070 | 2.2 |
+| 500 | 0.037 | 1.7 |
+| 1000 | 0.022 | 1.5 |
+
+### What it shows
+- **Batch 1 to 500 on RDS:** statements per row 4.450 to 0.037 (**-99.2%, 120x fewer**); time per row 114.4 ms to 2.4 ms (**-97.9%, 47x**).
+- **It is latency bound.** At batch size 1, 5.45 round trips x 16.6 ms is about 90 ms of the 114 ms per row (79%) spent waiting on the network. The same change gains less locally (14.8 to 1.7 ms, -88.5%), where a round trip costs 1 ms. At batch 500 the network share is about 27% of the time.
+- **Extrapolation to the whole catalogue (92,236 rows), database writes only:** batch 1 about **2.9 hours**; batch 500 about **3.7 minutes**. The batch-1 figure leaves out S3 reads, which would be sequential at batch size 1, so the true per-row time would be higher.
+- **Gains flatten past 500 in absolute terms.** 500 to 1000 saves 0.5 ms per row (-22%), about 49 s on 92,236 rows, while a batch holds twice as many payloads in memory and a failed batch redoes twice as much. 500 stays the default.
+- **The real backfill's writes were slower than the benchmark.** The measured clean (22 Oct, against RDS from the same laptop) took 822 s in total: 414.5 s of writes (**4.49 ms per row**) and 405.7 s of reads (S3 payloads plus the index query, 4.40 ms per row; the benchmark leaves S3 out). Writes alone are **1.86x** the benchmark's 2.42 ms per row at batch 500, so the benchmark cannot predict absolute production times. What was checked:
+  - **Temporary versus real tables** (no write-ahead log, no foreign keys): measured on the local test database, batch 500, four runs each: median 1.49 ms per row (temporary) against 1.71 ms (real), **+15%**.
+  - **Sample weight:** the sample has 4.44 episodes and 3.72 reviews per anime against 4.86 and 3.79 for the whole catalogue, so it is about 9% lighter on episodes.
+  - **Still unexplained, about 1.5x.** Not tested: RDS write cost on its network-attached storage, CPU-credit throttling on the t4g.micro (the balance was about 1 when checked), larger tables and indexes by the end of the run, and the Airflow container's slower client side compared with running natively on the laptop.
+
+  The batch-size **ratios** (statements per row, relative time) are the result to quote. Absolute times are only trustworthy for the real run.
+
+**Not measured.** The 2.9 h figure is an extrapolation from a 2,000-row sample, not a run of the whole catalogue at batch size 1. Batch size 1 is the same code with one raw row per batch, not a naive one-INSERT-per-child-row implementation, which would use more statements still.
+
+Reproduce: build the sample with `sample`, then `run <name> [sizes]` with `BENCH_DIR` and `BENCH_URL` set. `BENCH_REAL=1` writes to the real tables instead of temporary ones, and only runs on a database whose name contains "test". See the docstring in the script.
