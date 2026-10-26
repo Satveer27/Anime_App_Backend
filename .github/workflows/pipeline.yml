@@ -16,6 +16,10 @@ on:
 
     
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
+# The default token can be read/write; nothing here needs more than reading the repository.
+permissions:
+  contents: read
+
 jobs:
 
   startup-and-test:
@@ -157,3 +161,157 @@ jobs:
         if: always()
         run: docker compose down
 
+  # --- Deployment: only for a PUSH to main, never for a pull request ----------------------------
+  # changes : which parts of the push matter? airflow/ files, and Alembic files
+  # migrate : only if an Alembic file changed, bring RDS to the latest revision
+  # deploy  : only if something under airflow/ changed, and not if migrate failed, recreate Airflow
+  # If a migration fails, fix it and re-run the failed job: the next push will NOT retry it, because
+  # no Alembic file will have changed by then.
+  # migrate and deploy use separate concurrency groups on purpose: GitHub keeps only one PENDING job
+  # per group, so a shared group would let a queued deploy cancel a queued migration.
+  # NOTE: the app code (app/) is baked into the Airflow image, but a change to it does NOT redeploy
+  # Airflow by itself. After a fix under app/, redeploy by hand: on the server, in the repo,
+  #   git pull --ff-only && bash airflow/deploy.sh
+  # Secrets (Settings > Secrets and variables > Actions): ORACLE_HOST, ORACLE_USER, ORACLE_SSH_KEY,
+  # ORACLE_KNOWN_HOSTS (the server's host key line, so the runner can verify it is the right server).
+
+  migrate:
+    needs: [startup-and-test, dockerfile-build, changes]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.alembic == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: migrate-production
+      cancel-in-progress: false # never cut a running migration short; the next one waits
+
+    steps:
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull main and migrate RDS on the Oracle box
+        env:
+          HOST: ${{ secrets.ORACLE_HOST }}
+          SSH_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          # Whatever branch the server is on, it ends up on main at the newest commit, then migrates.
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+              "$SSH_USER@$HOST" \
+              'set -euo pipefail
+               cd ~/Anime_App_Backend
+               git fetch origin main
+               git checkout main
+               git pull --ff-only origin main
+               bash airflow/migrate.sh'
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+  changes:
+    # Only the airflow/ folder triggers a redeploy (DAGs, Dockerfile.prod, compose files, scripts).
+    # Changes elsewhere (app/, alembic/, dependencies) do not: migrations still run on every push,
+    # and a bug fix in app/ is redeployed by hand, which saves runner minutes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      airflow: ${{ steps.diff.outputs.airflow }}
+      alembic: ${{ steps.diff.outputs.alembic }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare with the previous main
+        id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # No usable previous commit (first push, force push): deploy to be safe
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "airflow=true" >> "$GITHUB_OUTPUT"
+            echo "alembic=true" >> "$GITHUB_OUTPUT"
+            echo "No previous commit to compare with: migrating and deploying"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BEFORE" "$AFTER")
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -Eq '^airflow/'; then
+            echo "airflow=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "airflow=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing under airflow/ changed: not redeploying Airflow"
+          fi
+          if echo "$changed" | grep -Eq '^(alembic/|alembic\.ini$)'; then
+            echo "alembic=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "alembic=false" >> "$GITHUB_OUTPUT"
+            echo "No Alembic file changed: not migrating"
+          fi
+
+  deploy:
+    # Runs only if airflow/ changed, the checks passed, and the migration did not fail. The migration
+    # may be skipped (no Alembic change). A skipped dependency would normally skip this job too, so
+    # the conditions are spelled out; !cancelled() replaces the implicit success() check.
+    needs: [startup-and-test, dockerfile-build, migrate, changes]
+    if: >-
+      !cancelled()
+      && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.startup-and-test.result == 'success'
+      && needs.dockerfile-build.result == 'success'
+      && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
+      && needs.changes.outputs.airflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false # never cut a running deploy short; the next one waits
+
+    steps:
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull main and recreate Airflow on the Oracle box
+        env:
+          HOST: ${{ secrets.ORACLE_HOST }}
+          SSH_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          # Pulls again (a no-op right after migrate, but needed when this job is re-run alone),
+          # then deploy.sh: guard against an active DAG run, build, recreate, wait until healthy.
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+              "$SSH_USER@$HOST" \
+              'set -euo pipefail
+               cd ~/Anime_App_Backend
+               git fetch origin main
+               git checkout main
+               git pull --ff-only origin main
+               bash airflow/deploy.sh'
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts
