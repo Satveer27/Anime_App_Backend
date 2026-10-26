@@ -1,16 +1,18 @@
-# Airflow for the pipeline box (ADR 0005), from the image built by CI (airflow/Dockerfile.prod).
+# Airflow for the pipeline box (ADR 0005), built from airflow/Dockerfile.prod.
 # Unlike docker-compose.yml (development): no repo mount, no default passwords, the UI is
 # reachable only through an SSH tunnel, and every secret must be set in .env or startup fails.
 #
-# On the server, in this folder, with .env filled in from env.prod.example:
-#   docker compose -f docker-compose.prod.yml pull
-#   docker compose -f docker-compose.prod.yml up airflow-init            (first time; exits)
-#   docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
-#   docker compose -f docker-compose.prod.yml up -d
+# On the server, in this folder, with .env filled in from env.prod.example, one command builds
+# the image and starts everything (airflow-init runs first on its own, then exits):
+#   docker compose -f docker-compose.prod.yml up -d --build
 # UI: ssh -L 8080:127.0.0.1:8080 <user>@<server>, then http://localhost:8080
+# Later, CI can build and push the image elsewhere and set AIRFLOW_IMAGE to it.
 ---
 x-airflow-common: &airflow-common
-  image: ${AIRFLOW_IMAGE:?set AIRFLOW_IMAGE in .env}
+  image: ${AIRFLOW_IMAGE:-anime-airflow:local}
+  build:
+    context: ..
+    dockerfile: airflow/Dockerfile.prod
   env_file:
     - .env
   environment: &airflow-common-env
