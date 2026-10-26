@@ -1,0 +1,19 @@
+# Keep the build context small and keep secrets out of it. The Dockerfiles copy what they need
+# by name, so none of this reaches an image anyway, but it is still sent to the Docker daemon.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.env
+.env.*
+**/.env
+**/.env.*
+airflow/logs
+airflow/config
+analysis
+docs
+tests

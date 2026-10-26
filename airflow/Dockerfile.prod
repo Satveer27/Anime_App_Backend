@@ -1,0 +1,25 @@
+# Production Airflow image: the official image, the app's own virtualenv, the app code, Alembic and
+# the DAGs, all baked in, so a deploy is one versioned image that can be rolled back.
+# (The development image, airflow/Dockerfile, mounts the repo instead.)
+#
+# Build from the repo root, for the Oracle Arm boxes (ADR 0005):
+#   docker buildx build --platform linux/arm64 -f airflow/Dockerfile.prod -t <image> .
+FROM apache/airflow:3.3.2
+
+USER root
+RUN mkdir -p /opt/app /opt/app-venv && chown airflow /opt/app /opt/app-venv
+
+USER airflow
+RUN pip install --no-cache-dir uv
+ENV UV_PROJECT_ENVIRONMENT=/opt/app-venv
+
+# Dependencies first, so editing code does not reinstall them (Docker caches this layer).
+WORKDIR /opt/app
+COPY --chown=airflow pyproject.toml uv.lock /opt/app/
+RUN uv sync --frozen --no-dev --no-install-project
+
+# The code the DAG tasks and the migration run, and the DAG files Airflow reads.
+COPY --chown=airflow app /opt/app/app
+COPY --chown=airflow alembic /opt/app/alembic
+COPY --chown=airflow alembic.ini /opt/app/alembic.ini
+COPY --chown=airflow airflow/dags /opt/airflow/dags
