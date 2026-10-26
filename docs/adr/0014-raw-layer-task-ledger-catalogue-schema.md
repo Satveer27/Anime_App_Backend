@@ -46,3 +46,7 @@ The pipeline stores each source response untouched in a raw table, tracks every 
 - A second process has to write the tag table, because the in-memory dict would go stale.
 - A new MAL type, status or relation name breaks a parser assumption.
 - Analysis needs spoiler reviews, the dropped review tags, or per-source score history.
+
+## Measured in the first full Backfill (22 Oct 2026)
+
+The catalogue is **23,059 anime** and **92,236 ingestion tasks** (4 per anime); all finished `done` on the first try, with none `failed`, `dead` or `gone`. 112,058 episodes, 87,313 reviews and 246,732 catalogue rows were written, with no parse failure. Episode lists exist for only 25% of the anime, so the episode table is 112,065 rows, not the millions an announced-episode count suggests. The raw responses now live in S3 (ADR 0016): 171 MiB in all. Full figures and the comparison with the projections: `docs/METRICS.md` section 5.

@@ -37,3 +37,7 @@ The reason is separation, not saving money. The raw layer is a large, write-once
 - Raw data grows far beyond the projection (more sources, or history), or the clean job spends most of its time waiting on S3.
 - We need SQL over raw payloads (for example for analysis); then a copy in Postgres or a query engine over the bucket is the alternative.
 - A second process has to write the same objects concurrently; the derived key would need a conflict rule.
+
+## Measured in the first full Backfill
+
+92,236 objects, 179,554,931 bytes compressed (7.8 KB per anime), against the 41.5 KB of uncompressed JSON per anime that ADR 0012 projected (-81%). The clean job reads them back concurrently, 16 at a time: 406 s of reads in a clean of 822 s. `docs/METRICS.md` section 5.
