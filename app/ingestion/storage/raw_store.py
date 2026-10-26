@@ -36,6 +36,8 @@ class RawStore:
                 retries={"max_attempts": 5, "mode": "standard"},
                 connect_timeout=5,
                 read_timeout=30,
+                # The clean job reads 16 objects at once; botocore's default pool holds only 10
+                max_pool_connections=20,
             ),
         )
 
@@ -74,4 +76,8 @@ class RawStore:
         except (BotoCoreError, ClientError) as exc:
             logger.error("raw_store_get_failed", key=key, error=type(exc).__name__)
             raise RawStoreError(f"get {key} failed: {type(exc).__name__}") from exc
-        return json.loads(gzip.decompress(body))
+        try:
+            return json.loads(gzip.decompress(body))
+        except (OSError, EOFError, ValueError) as exc:  # not gzip, truncated, or not JSON
+            logger.error("raw_store_object_corrupt", key=key, error=type(exc).__name__)
+            raise RawStoreError(f"{key} is not valid gzipped JSON: {type(exc).__name__}") from exc

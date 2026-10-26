@@ -18,6 +18,7 @@ The exit codes are one_pass's.
 
 import argparse
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
@@ -63,6 +64,10 @@ from app.ingestion.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
 
+# A failed clean run is only resumed if it is this recent. The clean job's run history is shared with
+# one_pass, so an old or full-pass failure must not decide where this week's clean starts.
+CLEAN_RESUME_MAX_AGE = timedelta(hours=24)
+
 
 def read_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the weekly or monthly refresh.")
@@ -77,12 +82,22 @@ def read_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def clean_resume_cursor(metrics: MetricsRepository) -> Cursor | None:
-    """Where the last clean run stopped, if it failed (None otherwise)."""
+    """Where the last clean run stopped, if that run is one this refresh may continue.
+
+    Only a run that FAILED, started within CLEAN_RESUME_MAX_AGE and was incremental (it has a
+    `since` cut-off) qualifies. A failed full pass (one_pass) has no cut-off: continuing it after its
+    cursor with this week's cut-off would skip the refreshed rows before the cursor for good.
+    """
     clean = await metrics.latest_run(CLEAN_JOB)
-    if clean and clean.status == RunStatus.FAILED and clean.summary:
-        saved = clean.summary.get("resume_after")  # stored as [mal_id, resource]
-        if saved:
-            return saved[0], Resource(saved[1])
+    if not (clean and clean.status == RunStatus.FAILED and clean.summary):
+        return None
+    if datetime.now(UTC) - clean.started_at > CLEAN_RESUME_MAX_AGE:
+        return None
+    if not clean.summary.get("since"):
+        return None
+    saved = clean.summary.get("resume_after")  # stored as [mal_id, resource]
+    if saved:
+        return saved[0], Resource(saved[1])
     return None
 
 

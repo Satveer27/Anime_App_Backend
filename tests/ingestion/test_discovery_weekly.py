@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -60,8 +61,12 @@ def catalogue_repo(mocker):
     return repo
 
 
-def failed_run(resume_page):
-    return SimpleNamespace(status=RunStatus.FAILED, summary={"resume_page": resume_page})
+def failed_run(resume_page, age=timedelta(minutes=10)):
+    return SimpleNamespace(
+        status=RunStatus.FAILED,
+        summary={"resume_page": resume_page},
+        started_at=datetime.now(UTC) - age,
+    )
 
 
 async def test_it_lists_airing_then_upcoming_from_tenrai(task_repo, metrics_repo, catalogue_repo):
@@ -184,3 +189,41 @@ async def test_the_three_argument_construction_still_works(task_repo, metrics_re
     job = DiscoveryJob(Adapter(), task_repo, metrics_repo)
 
     assert job.catalogue_repository is None
+
+
+async def test_a_failure_from_an_earlier_week_is_not_resumed(
+    task_repo, metrics_repo, catalogue_repo
+):
+    """Last Sunday's run died at page 2. This Sunday must start both lists at page 1."""
+    runs = {
+        "discovery_weekly_airing": failed_run(2, age=timedelta(days=7)),
+        "discovery_weekly_upcoming": failed_run(2, age=timedelta(days=7)),
+    }
+
+    async def latest_run(name):
+        return runs.get(name)
+
+    metrics_repo.latest_run.side_effect = latest_run
+    adapter = Adapter()
+    job = DiscoveryJob(adapter, task_repo, metrics_repo, catalogue_repo)
+
+    await job.run_job_weekly(resources=RESOURCES)
+
+    assert adapter.calls == [("airing", 1), ("airing", 2), ("upcoming", 1), ("upcoming", 2)]
+
+
+async def test_a_failure_from_a_few_hours_ago_is_still_resumed(
+    task_repo, metrics_repo, catalogue_repo
+):
+    runs = {"discovery_weekly_upcoming": failed_run(2, age=timedelta(hours=5))}
+
+    async def latest_run(name):
+        return runs.get(name)
+
+    metrics_repo.latest_run.side_effect = latest_run
+    adapter = Adapter()
+    job = DiscoveryJob(adapter, task_repo, metrics_repo, catalogue_repo)
+
+    await job.run_job_weekly(resources=RESOURCES)
+
+    assert adapter.calls[-1] == ("upcoming", 2)

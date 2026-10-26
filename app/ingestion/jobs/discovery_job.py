@@ -1,6 +1,6 @@
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -39,6 +39,9 @@ MONTHLY_RESOURCES = (Resource.DETAILS, Resource.STATISTICS, Resource.REVIEWS)
 WEEKLY_LIST_STATUSES = ("airing", "upcoming")
 # ...but the catalogue stores MAL's own wording, which is what the database step looks up.
 ACTIVE_CATALOGUE_STATUSES = ("Currently Airing", "Not yet aired")
+# A failed weekly or monthly run is only resumed (by Airflow's retry, or a rerun the same day). A
+# failure from an earlier schedule period must not make this period start at a late page.
+RESUME_MAX_AGE = timedelta(hours=24)
 # One insert statement binds two values per task and Postgres allows 32,767 bound values.
 TASKS_PER_STATEMENT = 5000
 
@@ -153,11 +156,18 @@ class DiscoveryJob:
         return summary
 
     async def _resume_page(self, job_name: str) -> int:
-        """Where this job's last run stopped, or 1 if it did not fail."""
+        """Where this job's last run stopped, or 1.
+
+        It resumes only a run that FAILED and started within RESUME_MAX_AGE. An older failure belongs
+        to an earlier schedule period (last week's run): resuming it would skip the early pages.
+        """
         last = await self.metrics_repository.latest_run(job_name)
-        if last and last.status == RunStatus.FAILED and last.summary:
-            return last.summary.get("resume_page") or 1
-        return 1
+        if not (last and last.status == RunStatus.FAILED and last.summary):
+            return 1
+        if datetime.now(UTC) - last.started_at > RESUME_MAX_AGE:
+            logger.info("discovery_resume_ignored_stale", job=job_name, started_at=last.started_at)
+            return 1
+        return last.summary.get("resume_page") or 1
 
     async def _reset_active_from_catalogue(self, resources: tuple[Resource, ...]) -> dict:
         """Send the tasks of every anime stored as airing or not yet aired back to pending."""
@@ -240,7 +250,7 @@ class DiscoveryJob:
                 for anime in result.get("data") or []:
                     summary["anime_seen"] += 1
                     mal_id = anime.get("mal_id")
-                    if not mal_id:
+                    if not isinstance(mal_id, int) or isinstance(mal_id, bool) or mal_id <= 0:
                         logger.warning("anime_missing_mal_id", anime=anime)
                         summary["anime_skipped"] += 1
                         continue

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -213,8 +214,16 @@ class Metrics:
         return self.run
 
 
-async def test_a_failed_clean_run_gives_its_cursor():
-    run = SimpleNamespace(status=RunStatus.FAILED, summary={"resume_after": [9, "reviews"]})
+def clean_run(status, resume_after=None, since="2026-10-22T20:50:28", age=timedelta(minutes=10)):
+    return SimpleNamespace(
+        status=status,
+        summary={"resume_after": resume_after, "since": since},
+        started_at=datetime.now(UTC) - age,
+    )
+
+
+async def test_a_recent_failed_incremental_clean_run_gives_its_cursor():
+    run = clean_run(RunStatus.FAILED, resume_after=[9, "reviews"])
 
     assert await refresh.clean_resume_cursor(Metrics(run)) == (9, Resource.REVIEWS)
 
@@ -223,10 +232,26 @@ async def test_a_failed_clean_run_gives_its_cursor():
     "run",
     [
         None,
-        SimpleNamespace(status=RunStatus.SUCCEEDED, summary={"resume_after": None}),
-        SimpleNamespace(status=RunStatus.FAILED, summary={"resume_after": None}),
-        SimpleNamespace(status=RunStatus.RUNNING, summary=None),
+        clean_run(RunStatus.SUCCEEDED, resume_after=[9, "reviews"]),
+        clean_run(RunStatus.FAILED, resume_after=None),
+        clean_run(RunStatus.RUNNING),
+        SimpleNamespace(status=RunStatus.RUNNING, summary=None, started_at=datetime.now(UTC)),
     ],
+    ids=["no run", "succeeded", "no cursor", "running", "running without summary"],
 )
 async def test_without_a_failed_clean_run_there_is_nothing_to_resume(run):
+    assert await refresh.clean_resume_cursor(Metrics(run)) is None
+
+
+async def test_a_failed_full_pass_is_not_continued_by_an_incremental_refresh():
+    """one_pass cleans everything (no `since`). Resuming it after its cursor with this week's
+    cut-off would skip the refreshed rows before the cursor for good."""
+    run = clean_run(RunStatus.FAILED, resume_after=[30000, "details"], since=None)
+
+    assert await refresh.clean_resume_cursor(Metrics(run)) is None
+
+
+async def test_a_clean_failure_from_days_ago_is_not_continued():
+    run = clean_run(RunStatus.FAILED, resume_after=[9, "reviews"], age=timedelta(days=3))
+
     assert await refresh.clean_resume_cursor(Metrics(run)) is None

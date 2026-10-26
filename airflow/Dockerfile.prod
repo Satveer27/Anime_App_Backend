@@ -10,7 +10,8 @@ USER root
 RUN mkdir -p /opt/app /opt/app-venv && chown airflow /opt/app /opt/app-venv
 
 USER airflow
-RUN pip install --no-cache-dir uv
+# uv is pinned so an old image can be rebuilt the same way later (the base image is pinned by tag)
+RUN pip install --no-cache-dir uv==0.12.3
 ENV UV_PROJECT_ENVIRONMENT=/opt/app-venv
 
 # Dependencies first, so editing code does not reinstall them (Docker caches this layer).

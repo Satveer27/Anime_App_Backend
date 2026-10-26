@@ -108,3 +108,24 @@ async def test_an_access_denied_put_raises_raw_store_error(store, s3):
 async def test_getting_a_missing_object_raises_raw_store_error(store):
     with pytest.raises(RawStoreError, match="get tenrai/details/9.json.gz"):
         await store.get(9, Resource.DETAILS)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [b"not gzip at all", gzip.compress(b"{truncated")[:-4], gzip.compress(b"{not json}")],
+    ids=["not gzip", "truncated gzip", "gzip of invalid json"],
+)
+async def test_a_corrupt_object_raises_raw_store_error_not_a_bare_exception(store, s3, stored):
+    s3.objects["tenrai/details/5.json.gz"] = stored
+
+    with pytest.raises(RawStoreError, match="tenrai/details/5.json.gz"):
+        await store.get(5, Resource.DETAILS)
+
+
+def test_the_connection_pool_is_large_enough_for_the_clean_jobs_concurrency():
+    from app.ingestion.jobs.clean_raw_job import RAW_STORE_CONCURRENCY
+    from app.ingestion.storage.raw_store import RawStore as Real
+
+    client = Real("bucket", region="eu-west-2")._client
+
+    assert client.meta.config.max_pool_connections >= RAW_STORE_CONCURRENCY

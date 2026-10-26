@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -55,8 +55,12 @@ def metrics_repo(mocker):
     return repo
 
 
-def failed_run(resume_page):
-    return SimpleNamespace(status=RunStatus.FAILED, summary={"resume_page": resume_page})
+def failed_run(resume_page, age=timedelta(minutes=10)):
+    return SimpleNamespace(
+        status=RunStatus.FAILED,
+        summary={"resume_page": resume_page},
+        started_at=datetime.now(UTC) - age,
+    )
 
 
 async def test_it_asks_for_last_year_onwards_then_the_most_popular(task_repo, metrics_repo):
@@ -139,3 +143,17 @@ async def test_it_returns_a_summary_per_list(task_repo, metrics_repo):
 
     assert set(summary) == {"recent_years", "popular"}
     assert summary["popular"]["pages"] == POPULAR_PAGES
+
+
+async def test_a_failure_from_an_earlier_month_is_not_resumed(task_repo, metrics_repo):
+    runs = {"discovery_monthly_popular": failed_run(4, age=timedelta(days=30))}
+
+    async def latest_run(name):
+        return runs.get(name)
+
+    metrics_repo.latest_run.side_effect = latest_run
+    adapter = Adapter()
+
+    await DiscoveryJob(adapter, task_repo, metrics_repo).run_job_monthly()
+
+    assert adapter.pages("popular") == list(range(1, POPULAR_PAGES + 1))
