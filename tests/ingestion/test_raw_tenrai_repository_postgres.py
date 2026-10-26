@@ -18,28 +18,28 @@ async def test_find_returns_none_when_missing_and_the_row_when_present(pg_sessio
     repo = RawTenraiRepository(pg_session)
     assert await repo.find(1, Resource.DETAILS) is None
 
-    await repo.upsert(1, Resource.DETAILS, {"data": {"mal_id": 1}})
+    await repo.upsert(1, Resource.DETAILS, 120)
     await repo.commit()
     row = await repo.find(1, Resource.DETAILS)
 
     assert row.resource is Resource.DETAILS
-    assert row.payload == {"data": {"mal_id": 1}}
+    assert row.size_bytes == 120
     assert row.fetched_at is not None
 
 
-async def test_upsert_overwrites_payload_and_fetched_at_without_duplicating(pg_session):
+async def test_upsert_overwrites_size_and_fetched_at_without_duplicating(pg_session):
     repo = RawTenraiRepository(pg_session)
-    await repo.upsert(1, Resource.DETAILS, {"v": 1})
+    await repo.upsert(1, Resource.DETAILS, 10)
     await repo.commit()
     first_fetched_at = (await repo.find(1, Resource.DETAILS)).fetched_at
 
-    await repo.upsert(1, Resource.DETAILS, {"v": 2})
+    await repo.upsert(1, Resource.DETAILS, 20)
     await repo.commit()
     pg_session.expire_all()
     row = await repo.find(1, Resource.DETAILS)
 
     assert await count_rows(pg_session) == 1
-    assert row.payload == {"v": 2}
+    assert row.size_bytes == 20
     assert row.fetched_at > first_fetched_at
 
 
@@ -48,29 +48,29 @@ async def test_resources_of_one_anime_are_separate_rows(pg_session):
 
     written = await repo.upsert_many(
         [
-            (1, Resource.DETAILS, {"d": 1}),
-            (1, Resource.EPISODES, [{"page": 1}, {"page": 2}]),  # multi-page: a list of pages
-            (2, Resource.DETAILS, {"d": 2}),
+            (1, Resource.DETAILS, 1),
+            (1, Resource.EPISODES, 2),
+            (2, Resource.DETAILS, 3),
         ]
     )
     await repo.commit()
 
     assert written == 3
-    assert (await repo.find(1, Resource.EPISODES)).payload == [{"page": 1}, {"page": 2}]
+    assert (await repo.find(1, Resource.EPISODES)).size_bytes == 2
     assert await count_rows(pg_session) == 3
 
 
 async def test_upsert_many_mixes_new_and_existing_rows(pg_session):
     repo = RawTenraiRepository(pg_session)
-    await repo.upsert(1, Resource.DETAILS, {"v": 1})
+    await repo.upsert(1, Resource.DETAILS, 1)
     await repo.commit()
 
-    await repo.upsert_many([(1, Resource.DETAILS, {"v": 2}), (2, Resource.DETAILS, {"v": 1})])
+    await repo.upsert_many([(1, Resource.DETAILS, 2), (2, Resource.DETAILS, 1)])
     await repo.commit()
     pg_session.expire_all()
 
     assert await count_rows(pg_session) == 2
-    assert (await repo.find(1, Resource.DETAILS)).payload == {"v": 2}
+    assert (await repo.find(1, Resource.DETAILS)).size_bytes == 2
 
 
 async def test_upsert_many_with_no_rows_does_nothing(pg_session):
@@ -79,7 +79,7 @@ async def test_upsert_many_with_no_rows_does_nothing(pg_session):
 
 async def test_delete_removes_only_the_matching_row(pg_session):
     repo = RawTenraiRepository(pg_session)
-    await repo.upsert_many([(1, Resource.DETAILS, {}), (1, Resource.REVIEWS, {})])
+    await repo.upsert_many([(1, Resource.DETAILS, 1), (1, Resource.REVIEWS, 1)])
     await repo.commit()
 
     assert await repo.delete(1, Resource.DETAILS) == 1
@@ -100,7 +100,7 @@ def at(day: int) -> datetime:
 async def seed_raw(session, rows):
     """rows: (mal_id, resource, fetched_day)"""
     for mal_id, resource, day in rows:
-        session.add(RawTenrai(mal_id=mal_id, resource=resource, payload={}, fetched_at=at(day)))
+        session.add(RawTenrai(mal_id=mal_id, resource=resource, size_bytes=1, fetched_at=at(day)))
     await session.commit()
 
 
@@ -196,10 +196,10 @@ async def test_since_and_cursor_work_together(pg_session):
     assert keys(second) == [(2, Resource.DETAILS)]
 
 
-async def test_get_batch_loads_the_payload(pg_session):
-    pg_session.add(RawTenrai(mal_id=1, resource=Resource.DETAILS, payload={"data": {"a": 1}}))
+async def test_get_batch_returns_the_index_rows_with_their_sizes(pg_session):
+    pg_session.add(RawTenrai(mal_id=1, resource=Resource.DETAILS, size_bytes=77))
     await pg_session.commit()
 
     (row,) = await RawTenraiRepository(pg_session).get_batch(None, None, 10)
 
-    assert row.payload == {"data": {"a": 1}}
+    assert (row.mal_id, row.resource, row.size_bytes) == (1, Resource.DETAILS, 77)

@@ -190,6 +190,22 @@ async def test_a_parsed_response_upserts_without_touching_other_pipelines_column
     assert anime.anilist_score == Decimal("8.80")
 
 
+async def test_anime_ids_with_status_returns_the_matching_anime_only(pg_session):
+    await seed_anime(pg_session, 1, status="Currently Airing")
+    await seed_anime(pg_session, 2, status="Finished Airing")
+    await seed_anime(pg_session, 3, status="Not yet aired")
+    await seed_anime(pg_session, 4)  # no status stored
+    repo = CatalogueRepository(pg_session)
+
+    assert await repo.anime_ids_with_status(["Currently Airing", "Not yet aired"]) == {1, 3}
+    assert await repo.anime_ids_with_status(("Finished Airing",)) == {2}
+    assert await repo.anime_ids_with_status(["No such status"]) == set()
+
+
+async def test_anime_ids_with_no_statuses_runs_no_query(pg_session):
+    assert await CatalogueRepository(pg_session).anime_ids_with_status([]) == set()
+
+
 async def test_existing_anime_ids_returns_only_the_ids_that_have_a_row(pg_session):
     await seed_anime(pg_session, 1)
     await seed_anime(pg_session, 3)

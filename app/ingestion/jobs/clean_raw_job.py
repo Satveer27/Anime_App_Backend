@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from datetime import datetime
@@ -16,6 +17,7 @@ from app.ingestion.parsers.reviews import clean_reviews
 from app.ingestion.parsers.statistics import clean_statistics
 from app.ingestion.repository.metrics_repository import MetricsRepository
 from app.ingestion.repository.raw_tenrai_repository import RawTenraiRepository
+from app.ingestion.storage.raw_store import RawStore
 
 logger = structlog.get_logger(__name__)
 
@@ -26,6 +28,8 @@ PROGRESS_EVERY_BATCHES = 20
 PAYLOAD_LOG_CHARS = 1000
 # How many anime ids to list in the "skipped, no anime row" warning.
 SKIPPED_IDS_LOGGED = 20
+# How many S3 reads run at once while a batch is loaded.
+RAW_STORE_CONCURRENCY = 16
 
 COUNT_KEYS = (
     "rows_read",
@@ -64,18 +68,32 @@ class BatchResult(NamedTuple):
     counts: dict[str, int]
 
 
+class RawDoc(NamedTuple):
+    """An index row together with the response it points at, as the parsers want it."""
+
+    mal_id: int
+    resource: Resource
+    payload: dict | list
+
+
 class CleanAnimeJob:
-    """Parses raw Tenrai rows into the catalogue, one batch of raw rows at a time (ADR 0014)."""
+    """Parses raw Tenrai responses into the catalogue, one batch of index rows at a time.
+
+    The index rows come from `raw_tenrai`; the responses they point at are read from S3
+    (ADR 0014, ADR 0016).
+    """
 
     def __init__(
         self,
         catalogue_repository: CatalogueRepository,
         raw_tenrai_repository: RawTenraiRepository,
         metric_repository: MetricsRepository,
+        raw_store: RawStore,
     ):
         self.catalogue_repository = catalogue_repository
         self.raw_tenrai_repository = raw_tenrai_repository
         self.metric_repository = metric_repository
+        self.raw_store = raw_store
 
     async def full_clean_loop(
         self,
@@ -128,7 +146,7 @@ class CleanAnimeJob:
                         run_id=run_id,
                         **self._summary(totals, batches, slowest, started, since),
                     )
-        except Exception as exc:
+        except BaseException as exc:  # includes Ctrl-C and cancellation; re-raised below
             # `after` is the last batch that was committed: the place to resume from
             failed = self._summary(totals, batches, slowest, started, since)
             failed["resume_after"] = [after[0], str(after[1])] if after else None
@@ -164,12 +182,13 @@ class CleanAnimeJob:
         rows = await self.raw_tenrai_repository.get_batch(since, after, batch_size)
         if not rows:
             return BatchResult(None, counts)
+        docs = await self._load_payloads(rows)
         counts["rows_read"] = len(rows)
         counts["read_seconds"] = time.monotonic() - read_started
 
         write_started = time.monotonic()
         try:
-            new_tags, new_studios = await self._clean_rows(rows, counts, tags, studios)
+            new_tags, new_studios = await self._clean_rows(docs, counts, tags, studios)
             await self.catalogue_repository.commit()
         except Exception:
             await self.catalogue_repository.rollback()
@@ -183,8 +202,23 @@ class CleanAnimeJob:
         logger.info("clean_batch_done", last_mal_id=last.mal_id, **self._rounded(counts))
         return BatchResult((last.mal_id, last.resource), counts)
 
+    async def _load_payloads(self, rows: list[RawTenrai]) -> list[RawDoc]:
+        """Read each row's response from S3, a few at a time, in the rows' order.
+
+        A response that cannot be read raises RawStoreError and stops the run: every index row
+        was written after its object, so a missing one means something is wrong, not one anime.
+        """
+        limit = asyncio.Semaphore(RAW_STORE_CONCURRENCY)
+
+        async def load(row: RawTenrai) -> RawDoc:
+            async with limit:
+                payload = await self.raw_store.get(row.mal_id, row.resource)
+            return RawDoc(row.mal_id, row.resource, payload)
+
+        return list(await asyncio.gather(*(load(row) for row in rows)))
+
     async def _clean_rows(
-        self, rows: list[RawTenrai], counts: dict[str, int], tags: Names, studios: Names
+        self, rows: list[RawDoc], counts: dict[str, int], tags: Names, studios: Names
     ) -> tuple[Names, Names]:
         """Write the batch; returns the tags and studios that were new or renamed."""
         details = [row for row in rows if row.resource == Resource.DETAILS]
@@ -194,7 +228,7 @@ class CleanAnimeJob:
         return new_tags, new_studios
 
     async def _clean_details(
-        self, details: list[RawTenrai], tags: Names, studios: Names, counts: dict[str, int]
+        self, details: list[RawDoc], tags: Names, studios: Names, counts: dict[str, int]
     ) -> tuple[Names, Names]:
         """The anime rows, then the tags and studios they point at, then the links."""
         animes = []
@@ -239,7 +273,7 @@ class CleanAnimeJob:
         )
         return new_tags, new_studios
 
-    async def _clean_others(self, others: list[RawTenrai], counts: dict[str, int]) -> None:
+    async def _clean_others(self, others: list[RawDoc], counts: dict[str, int]) -> None:
         """Statistics, episodes and reviews, for the anime that have a row."""
         # One query tells us which anime exist, including the ones just upserted.
         present = await self.catalogue_repository.existing_anime_ids({r.mal_id for r in others})
@@ -311,7 +345,7 @@ class CleanAnimeJob:
         return summary
 
     @staticmethod
-    def _parse_failed(row: RawTenrai, counts: dict[str, int]) -> None:
+    def _parse_failed(row: RawDoc, counts: dict[str, int]) -> None:
         counts["parse_failed"] += 1
         logger.warning(
             "clean_parse_failed",

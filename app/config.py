@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     tenrai_rate_limiter_requests_per_minute: float = 100
     mal_data_base_url: str = "https://api.tenrai.org/v1"
     refresh_grace_seconds: int = 10
+    # Raw Tenrai responses live in S3 (ADR 0016). Only the ingestion jobs need it, so it is
+    # optional here and the jobs refuse to start without a bucket. Credentials come from the
+    # standard AWS chain (env vars or an IAM role), not from settings.
+    raw_s3_bucket: str | None = None
+    raw_s3_prefix: str = "tenrai"
+    aws_region: str | None = None
     resend_api_key: str
     frontend_url: str
 

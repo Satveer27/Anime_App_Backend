@@ -14,6 +14,9 @@ class FakeAdapter:
         self.pages = pages or {}
         self.fail_on = fail_on
         self.calls: list[tuple[int, dict]] = []
+        self.rate_limited_count = 0
+        self.request_count = 0
+        self.retry_count = 0
 
     async def list_anime(self, page: int = 1, **filters):
         self.calls.append((page, filters))
@@ -99,3 +102,21 @@ async def test_resume_from_page_counts_pages_run(task_repo, metrics_repo):
 
     assert [page for page, _ in adapter.calls] == [2]
     assert summary["pages"] == 1
+
+
+@pytest.mark.parametrize("bad_id", [None, 0, -5, "12", 1.5, True, [3]])
+async def test_an_entry_without_a_proper_integer_id_is_skipped_not_inserted(
+    task_repo, metrics_repo, bad_id
+):
+    page = {
+        "pagination": {"has_next_page": False},
+        "data": [{"mal_id": bad_id, "type": "TV"}, {"mal_id": 9, "type": "TV"}],
+    }
+
+    summary = await DiscoveryJob(FakeAdapter({1: page}), task_repo, metrics_repo).run_job_overall()
+
+    inserted = {
+        mal_id for call in task_repo.insert_tasks.await_args_list for mal_id, _ in call.args[0]
+    }
+    assert inserted == {9}
+    assert summary["anime_skipped"] == 1

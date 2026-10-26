@@ -1,7 +1,10 @@
+import math
 import time
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
+from app.catalogue.repository import CatalogueRepository
 from app.ingestion.adapters.tenrai import TenraiAdapter
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
@@ -23,6 +26,24 @@ LIST_TYPES = "tv,movie,ova,special,ona,tv_special"
 EXCLUDED_TYPES = {"Music", "CM", "PV"}
 PROGRESS_EVERY_PAGES = 25
 JOB_NAME = "discovery_overall"
+WEEKLY_JOB_NAME = "discovery_weekly"
+MONTHLY_JOB_NAME = "discovery_monthly"
+# The monthly refresh covers the most popular anime, one list page at a time. A list page holds
+# 100 anime (TenraiAdapter.list_anime's default limit), so 500 anime are 5 pages.
+POPULAR_ANIME = 500
+LIST_PAGE_SIZE = 100
+POPULAR_PAGES = math.ceil(POPULAR_ANIME / LIST_PAGE_SIZE)
+# ADR 0004: the monthly refresh skips episodes, which the weekly Active tier keeps current.
+MONTHLY_RESOURCES = (Resource.DETAILS, Resource.STATISTICS, Resource.REVIEWS)
+# The Active tier (CONTEXT.md) is asked of Tenrai with these two words, one list each...
+WEEKLY_LIST_STATUSES = ("airing", "upcoming")
+# ...but the catalogue stores MAL's own wording, which is what the database step looks up.
+ACTIVE_CATALOGUE_STATUSES = ("Currently Airing", "Not yet aired")
+# A failed weekly or monthly run is only resumed (by Airflow's retry, or a rerun the same day). A
+# failure from an earlier schedule period must not make this period start at a late page.
+RESUME_MAX_AGE = timedelta(hours=24)
+# One insert statement binds two values per task and Postgres allows 32,767 bound values.
+TASKS_PER_STATEMENT = 5000
 
 
 class DiscoveryJob:
@@ -31,11 +52,14 @@ class DiscoveryJob:
         tenrai_adapter: TenraiAdapter,
         task_repository: TaskRepository,
         metrics_repository: MetricsRepository,
+        catalogue_repository: CatalogueRepository | None = None,
     ):
         self.tenrai_adapter = tenrai_adapter
         self.task_repository = task_repository
         # Must use its own session so the run record survives a failure in the task session.
         self.metrics_repository = metrics_repository
+        # Only the weekly run reads the catalogue; it shares the task repository's session.
+        self.catalogue_repository = catalogue_repository
 
     async def run_job_overall(self, page: int = 1) -> dict:
         """Page through Tenrai's whole anime list and create the missing tasks.
@@ -62,6 +86,105 @@ class DiscoveryJob:
         """
         return await self._run(job_name, page, filters, resources, reset_existing=True)
 
+    async def run_job_weekly(
+        self,
+        job_name: str = WEEKLY_JOB_NAME,
+        resources: tuple[Resource, ...] = DISCOVERY_RESOURCES,
+    ) -> dict:
+        """The weekly refresh of the Active tier: reset the tasks of every anime that is live.
+
+        1. Tenrai's `airing` list, then its `upcoming` list: new anime get their tasks, known
+           ones have their `done` and `failed` tasks sent back to `pending`.
+        2. Every anime the catalogue holds as airing or not yet aired, which includes the ones
+           that finished since the last run and so no longer show up in Tenrai's lists. Their
+           final episodes and score are fetched once more.
+
+        Each list is recorded under its own name (`{job_name}_airing`, `{job_name}_upcoming`)
+        and resumes from its own last failed run, so a retry never starts one list at the
+        other's page. Run it before the fetch worker starts, not during a worker run.
+        Returns the summary of each step.
+        """
+        if self.catalogue_repository is None:
+            raise ValueError("run_job_weekly needs a catalogue repository")
+
+        summary = {}
+        for status in WEEKLY_LIST_STATUSES:
+            name = f"{job_name}_{status}"
+            summary[status] = await self._run(
+                name,
+                await self._resume_page(name),
+                {"status": status},
+                resources,
+                reset_existing=True,
+            )
+        summary["catalogue"] = await self._reset_active_from_catalogue(resources)
+        return summary
+
+    async def run_job_monthly(
+        self,
+        job_name: str = MONTHLY_JOB_NAME,
+        resources: tuple[Resource, ...] = MONTHLY_RESOURCES,
+    ) -> dict:
+        """The monthly refresh (ADR 0004): last year's and this year's anime, then the top ones.
+
+        1. `recent_years`: anime that started in last year or later (`start_date` is a lower
+           bound if Tenrai reads it like the API it replaced; confirm with a probe).
+        2. `popular`: the first POPULAR_PAGES pages of the list ordered by popularity (rank 1 first), most
+           followed first, which is POPULAR_ANIME anime.
+
+        Only details, statistics and reviews are fetched. Each list is recorded under its own
+        name (`{job_name}_recent_years`, `{job_name}_popular`) and resumes from its own last
+        failed run. Run it before the fetch worker starts, not during a worker run.
+        Returns the summary of each list.
+        """
+        last_year = datetime.now(UTC).year - 1
+        lists = {
+            "recent_years": ({"start_date": str(last_year)}, None),
+            "popular": ({"order_by": "popularity", "sort": "asc"}, POPULAR_PAGES),
+        }
+        summary = {}
+        for key, (filters, max_pages) in lists.items():
+            name = f"{job_name}_{key}"
+            summary[key] = await self._run(
+                name,
+                await self._resume_page(name),
+                filters,
+                resources,
+                reset_existing=True,
+                max_pages=max_pages,
+            )
+        return summary
+
+    async def _resume_page(self, job_name: str) -> int:
+        """Where this job's last run stopped, or 1.
+
+        It resumes only a run that FAILED and started within RESUME_MAX_AGE. An older failure belongs
+        to an earlier schedule period (last week's run): resuming it would skip the early pages.
+        """
+        last = await self.metrics_repository.latest_run(job_name)
+        if not (last and last.status == RunStatus.FAILED and last.summary):
+            return 1
+        if datetime.now(UTC) - last.started_at > RESUME_MAX_AGE:
+            logger.info("discovery_resume_ignored_stale", job=job_name, started_at=last.started_at)
+            return 1
+        return last.summary.get("resume_page") or 1
+
+    async def _reset_active_from_catalogue(self, resources: tuple[Resource, ...]) -> dict:
+        """Send the tasks of every anime stored as airing or not yet aired back to pending."""
+        ids = await self.catalogue_repository.anime_ids_with_status(ACTIVE_CATALOGUE_STATUSES)
+        rows = [(mal_id, resource) for mal_id in sorted(ids) for resource in resources]
+        inserted = reset = 0
+        for start in range(0, len(rows), TASKS_PER_STATEMENT):
+            new, again = await self.task_repository.insert_or_reset_tasks(
+                rows[start : start + TASKS_PER_STATEMENT]
+            )
+            inserted += new
+            reset += again
+        await self.task_repository.commit()
+        result = {"anime": len(ids), "tasks_inserted": inserted, "tasks_reset": reset}
+        logger.info("discovery_weekly_catalogue_reset", **result)
+        return result
+
     async def _run(
         self,
         job_name: str,
@@ -69,8 +192,12 @@ class DiscoveryJob:
         filters: dict,
         resources: tuple[Resource, ...],
         reset_existing: bool,
+        max_pages: int | None = None,
     ) -> dict:
         """The paging loop shared by the overall and refresh runs.
+
+        `max_pages` stops after that page number even if Tenrai has more (for "the top N"). It
+        counts page numbers, so a run resumed at page 4 of 5 fetches pages 4 and 5.
 
         Commits once per page. A failed page stops the job and re-raises: everything before it
         is already saved. The run and its metrics are recorded in ingestion_run, whether it
@@ -92,6 +219,10 @@ class DiscoveryJob:
             "max_list_seconds": 0.0,
         }
         started = time.monotonic()
+        # the adapter's counters are cumulative, so report the difference over this run
+        rate_limited_at_start = self.tenrai_adapter.rate_limited_count
+        requests_at_start = self.tenrai_adapter.request_count
+        retries_at_start = self.tenrai_adapter.retry_count
         run_id = await self.metrics_repository.start_run(job_name)
         await self.metrics_repository.commit()
         logger.info(
@@ -112,12 +243,14 @@ class DiscoveryJob:
                 summary["max_list_seconds"] = max(summary["max_list_seconds"], list_elapsed)
                 pagination = result.get("pagination") or {}
                 has_next = bool(pagination.get("has_next_page"))
+                if max_pages and page >= max_pages:
+                    has_next = False
 
                 rows = []
                 for anime in result.get("data") or []:
                     summary["anime_seen"] += 1
                     mal_id = anime.get("mal_id")
-                    if not mal_id:
+                    if not isinstance(mal_id, int) or isinstance(mal_id, bool) or mal_id <= 0:
                         logger.warning("anime_missing_mal_id", anime=anime)
                         summary["anime_skipped"] += 1
                         continue
@@ -142,16 +275,26 @@ class DiscoveryJob:
                 await self.task_repository.commit()
                 summary["db_seconds"] += time.monotonic() - db_started
                 summary["pages"] += 1
+                summary["rate_limited_amount"] = (
+                    self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+                )
+                summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
+                summary["retries"] = self.tenrai_adapter.retry_count - retries_at_start
 
                 if summary["pages"] % PROGRESS_EVERY_PAGES == 0:
                     logger.info(
                         "discovery_progress", run_id=run_id, **self._metrics(summary, started)
                     )
                 page += 1
-        except Exception as exc:
+        except BaseException as exc:  # includes Ctrl-C and cancellation; re-raised below
             failed = self._metrics(summary, started)
             failed["failed_page"] = page
             failed["resume_page"] = page  # nothing of this page was committed
+            failed["rate_limited_amount"] = (
+                self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+            )
+            failed["requests"] = self.tenrai_adapter.request_count - requests_at_start
+            failed["retries"] = self.tenrai_adapter.retry_count - retries_at_start
             logger.exception("discovery_failed", run_id=run_id, job=job_name, **failed)
             await self._record_run(run_id, RunStatus.FAILED, failed, f"{type(exc).__name__}: {exc}")
             raise
@@ -160,6 +303,11 @@ class DiscoveryJob:
             logger.warning("discovery_type_filter_leaked", count=summary["anime_skipped_type"])
         summary = self._metrics(summary, started)
         summary["resume_page"] = None
+        summary["rate_limited_amount"] = (
+            self.tenrai_adapter.rate_limited_count - rate_limited_at_start
+        )
+        summary["requests"] = self.tenrai_adapter.request_count - requests_at_start
+        summary["retries"] = self.tenrai_adapter.retry_count - retries_at_start
         await self._record_run(run_id, RunStatus.SUCCEEDED, summary)
         logger.info("discovery_finished", run_id=run_id, job=job_name, **summary)
         return summary
@@ -181,7 +329,7 @@ class DiscoveryJob:
         pages = summary["pages"]
         metrics = dict(summary, elapsed_seconds=elapsed)
         if pages:
-            metrics["requests_per_minute"] = pages / elapsed * 60
+            metrics["requests_per_minute"] = summary["requests"] / elapsed * 60
             metrics["avg_list_ms"] = summary["list_seconds"] / pages * 1000
             metrics["avg_db_ms"] = summary["db_seconds"] / pages * 1000
         return {k: round(v, 3) if isinstance(v, float) else v for k, v in metrics.items()}

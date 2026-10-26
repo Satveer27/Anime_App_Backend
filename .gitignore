@@ -31,3 +31,6 @@ analysis/tenrai_probe/probe_results_*.jsonl
 
 # Scripts
 app/ingestion/scripts
+# Airflow
+airflow/logs/
+airflow/config/

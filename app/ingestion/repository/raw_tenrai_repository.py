@@ -9,7 +9,10 @@ from app.ingestion.models import RawTenrai
 
 
 class RawTenraiRepository:
-    """Raw Tenrai responses, one row per (mal_id, resource). A refresh overwrites the row (ADR 0014)."""
+    """Index of the stored Tenrai responses, one row per (mal_id, resource).
+
+    The responses themselves are S3 objects (RawStore, ADR 0016). A refresh overwrites the row.
+    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -26,7 +29,7 @@ class RawTenraiRepository:
         after: tuple[int, Resource] | None,
         limit: int,
     ) -> list[RawTenrai]:
-        """The next `limit` raw rows in (mal_id, resource) order, for parsing in bulk.
+        """The next `limit` index rows in (mal_id, resource) order, for parsing in bulk.
 
         `since`: only rows fetched at or after this time (None means every row). The caller
         decides it, e.g. the start of the last successful run, or the first of the month.
@@ -48,12 +51,12 @@ class RawTenraiRepository:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
-    async def upsert(self, mal_id: int, resource: Resource, payload: dict | list) -> None:
-        """Store one response, overwriting the payload and fetched_at if the row exists."""
-        await self.upsert_many([(mal_id, resource, payload)])
+    async def upsert(self, mal_id: int, resource: Resource, size_bytes: int) -> None:
+        """Record that a response is stored, overwriting size_bytes and fetched_at if it was."""
+        await self.upsert_many([(mal_id, resource, size_bytes)])
 
-    async def upsert_many(self, rows: list[tuple[int, Resource, dict | list]]) -> int:
-        """Store several responses in one statement and return how many rows were written.
+    async def upsert_many(self, rows: list[tuple[int, Resource, int]]) -> int:
+        """Record several stored responses in one statement; returns how many rows were written.
 
         Each (mal_id, resource) may appear only once in `rows`: Postgres refuses to update the
         same row twice in one statement.
@@ -62,13 +65,13 @@ class RawTenraiRepository:
             return 0
         stmt = insert(RawTenrai).values(
             [
-                {"mal_id": mal_id, "resource": resource, "payload": payload}
-                for mal_id, resource, payload in rows
+                {"mal_id": mal_id, "resource": resource, "size_bytes": size_bytes}
+                for mal_id, resource, size_bytes in rows
             ]
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["mal_id", "resource"],
-            set_={"payload": stmt.excluded.payload, "fetched_at": func.now()},
+            set_={"size_bytes": stmt.excluded.size_bytes, "fetched_at": func.now()},
         )
         result = await self.db.execute(stmt)
         return result.rowcount

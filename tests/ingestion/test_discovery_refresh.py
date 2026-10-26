@@ -12,6 +12,9 @@ class FakeAdapter:
         self.pages = pages
         self.fail_on = fail_on
         self.calls = []
+        self.rate_limited_count = 0
+        self.request_count = 0
+        self.retry_count = 0
 
     async def list_anime(self, page=1, **filters):
         self.calls.append((page, filters))

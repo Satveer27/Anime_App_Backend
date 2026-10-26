@@ -29,6 +29,10 @@ async def status_of(session, mal_id, resource=Resource.DETAILS):
 
 
 class FakeAdapter:
+    request_count = 0
+    retry_count = 0
+    rate_limited_count = 0
+
     def __init__(self, pages):
         self.pages = pages
 

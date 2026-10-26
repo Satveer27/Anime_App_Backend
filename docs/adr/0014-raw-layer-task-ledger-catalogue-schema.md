@@ -5,7 +5,7 @@ The pipeline stores each source response untouched in a raw table, tracks every 
 ## Decisions
 
 **Raw layer**
-- **One raw table per source.** Tenrai's is `raw_tenrai`, keyed `(mal_id, resource)`, with a `JSONB` `payload` and `fetched_at`. A refresh overwrites the row; there is no history (ADR 0004).
+- **One raw table per source.** Tenrai's is `raw_tenrai`, keyed `(mal_id, resource)`, with a `JSONB` `payload` and `fetched_at`. *(The payload moved to S3 in ADR 0016; the table now only indexes it.)* A refresh overwrites the row; there is no history (ADR 0004).
 - **A raw row exists only for a successful fetch.** There is no `http_status` column, because the outcome of a failed fetch (404, retries exhausted) lives on the task. There is no `source` column either, because the table name is the source.
 - **A multi-page Resource keeps every page in one row** (a list of pages), written once after the last page. If a page fails, nothing is stored and the task is retried from page 1. Only 1-7% of anime have more than one episodes page (ADR 0012).
 - **Rejected: one generic raw table for all sources.** The sources differ in key and shape: Tenrai is keyed by MAL id, AniList by its own id, and IMDb is bulk dumps keyed by `tconst`. A generic table would need a text key and would fit IMDb badly.
@@ -46,3 +46,7 @@ The pipeline stores each source response untouched in a raw table, tracks every 
 - A second process has to write the tag table, because the in-memory dict would go stale.
 - A new MAL type, status or relation name breaks a parser assumption.
 - Analysis needs spoiler reviews, the dropped review tags, or per-source score history.
+
+## Measured in the first full Backfill (22 Oct 2026)
+
+The catalogue is **23,059 anime** and **92,236 ingestion tasks** (4 per anime); all finished `done` on the first try, with none `failed`, `dead` or `gone`. 112,058 episodes, 87,313 reviews and 246,732 catalogue rows were written, with no parse failure. Episode lists exist for only 25% of the anime, so the episode table is 112,065 rows, not the millions an announced-episode count suggests. The raw responses now live in S3 (ADR 0016): 171 MiB in all. Full figures and the comparison with the projections: `docs/METRICS.md` section 5.

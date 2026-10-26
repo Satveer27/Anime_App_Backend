@@ -1,0 +1,129 @@
+# Airflow for the pipeline box (ADR 0005), built from airflow/Dockerfile.prod.
+# Unlike docker-compose.yml (development): no repo mount, no default passwords, the UI is
+# reachable only through an SSH tunnel, and every secret must be set in .env or startup fails.
+#
+# On the server, in this folder, with .env filled in from env.prod.example, one command builds
+# the image and starts everything (airflow-init runs first on its own, then exits):
+#   docker compose -f docker-compose.prod.yml up -d --build
+# UI: ssh -L 8080:127.0.0.1:8080 <user>@<server>, then http://localhost:8080
+# Later, CI can build and push the image elsewhere and set AIRFLOW_IMAGE to it.
+---
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE:-anime-airflow:local}
+  build:
+    context: ..
+    dockerfile: airflow/Dockerfile.prod
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?set AIRFLOW_DB_PASSWORD in .env}@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:?set FERNET_KEY in .env}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?set AIRFLOW__API_AUTH__JWT_SECRET in .env}
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # The ingestion tasks read the app's settings (DB_URL, RAW_S3_BUCKET, AWS keys ...) from .env
+    LOG_SQL: 'false'
+  volumes:
+    - airflow-logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  restart: unless-stopped
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  # Airflow's own metadata database, separate from the anime database on RDS.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?set AIRFLOW_DB_PASSWORD in .env}
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # One-off: create/upgrade Airflow's tables, the admin user and the one-slot pool (ADR 0012).
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        /entrypoint airflow pools set tenrai 1 "the whole ingestion lane, one task at a time (ADR 0012)"
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:?set AIRFLOW_ADMIN_USER in .env}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?set AIRFLOW_ADMIN_PASSWORD in .env}
+    restart: "no"
+
+  # One-off: apply the anime database's Alembic migrations to RDS, with the code in this image.
+  # It is a profile, so a plain `up` never runs it. CI runs it before restarting the stack.
+  migrate:
+    <<: *airflow-common
+    profiles: ["migrate"]
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - cd /opt/app && /opt/app-venv/bin/alembic upgrade head && /opt/app-venv/bin/alembic check
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080" # loopback only: reach it through an SSH tunnel, never the internet
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+  airflow-logs:

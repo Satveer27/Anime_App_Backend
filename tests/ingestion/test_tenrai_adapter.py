@@ -3,6 +3,7 @@ import pytest
 
 from app.ingestion.adapters.tenrai import TenraiAdapter
 from app.ingestion.exceptions import (
+    AccessDeniedError,
     CircuitOpenError,
     GoneError,
     NetworkError,
@@ -81,7 +82,18 @@ async def test_404_is_gone_and_not_retried():
     assert len(h.requests) == 1
 
 
-@pytest.mark.parametrize("code", [400, 403, 422])
+@pytest.mark.parametrize("code", [401, 403])
+async def test_401_and_403_raise_access_denied_without_retry(code):
+    h = Harness([status(code)])
+
+    with pytest.raises(AccessDeniedError):
+        await h.adapter.get_full(1)
+
+    assert len(h.requests) == 1
+    assert h.sleeps == []
+
+
+@pytest.mark.parametrize("code", [400, 422])
 async def test_other_4xx_is_permanent_and_not_retried(code):
     h = Harness([status(code)])
 
@@ -121,6 +133,28 @@ async def test_429_with_unparsable_retry_after_waits_30s():
     await h.adapter.get_full(1)
 
     assert h.sleeps == [30]
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [("inf", 30), ("nan", 30), ("-5", 30), ("3600", 3600), ("0", 0)],
+)
+async def test_429_retry_after_uses_the_server_value_unless_unusable(header, expected):
+    h = Harness([status(429, {"Retry-After": header}), ok()])
+
+    await h.adapter.get_full(1)
+
+    assert h.sleeps == [expected]
+
+
+async def test_counts_requests_and_retries():
+    h = Harness([status(503), status(503), ok(), ok()])
+
+    await h.adapter.get_full(1)
+    await h.adapter.get_full(2)
+
+    assert h.adapter.request_count == 4
+    assert h.adapter.retry_count == 2
 
 
 @pytest.mark.parametrize("code", [500, 502, 503, 504])

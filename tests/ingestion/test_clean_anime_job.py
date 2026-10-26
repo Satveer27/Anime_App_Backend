@@ -1,7 +1,9 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import create_autospec
 
 import pytest
+from raw_store_fake import InMemoryRawStore
 from sqlalchemy import func, select
 from structlog.testing import capture_logs
 
@@ -18,6 +20,7 @@ from app.catalogue.models import (
 )
 from app.catalogue.repository import CatalogueRepository
 from app.ingestion.enums.resource_enum import Resource
+from app.ingestion.exceptions import RawStoreError
 from app.ingestion.jobs import clean_raw_job
 from app.ingestion.jobs.clean_raw_job import (
     COUNT_KEYS,
@@ -57,12 +60,27 @@ def reviews(anime_id: int, count: int = 2, text: str = "great") -> dict:
     return {"data": [{"mal_id": anime_id * 100 + n, "review": text} for n in range(count)]}
 
 
+# The responses live in S3 in production; here one in-memory store serves every test, emptied
+# before each one. The index rows go to Postgres, as in production.
+STORE = InMemoryRawStore()
+
+
+@pytest.fixture(autouse=True)
+def empty_store():
+    STORE.objects.clear()
+
+
+def put_payload(mal_id: int, resource: Resource, payload) -> None:
+    STORE.objects[(mal_id, Resource(resource))] = payload
+
+
 async def seed(session, rows):
     """rows: (mal_id, resource, payload) or (mal_id, resource, payload, fetched_day)"""
     for row in rows:
         mal_id, resource, payload, *day = row
+        put_payload(mal_id, resource, payload)
         session.add(
-            RawTenrai(mal_id=mal_id, resource=resource, payload=payload, fetched_at=at(*day or [1]))
+            RawTenrai(mal_id=mal_id, resource=resource, size_bytes=1, fetched_at=at(*day or [1]))
         )
     await session.commit()
 
@@ -72,6 +90,7 @@ def make_job(session) -> CleanAnimeJob:
         CatalogueRepository(session),
         RawTenraiRepository(session),
         MetricsRepository(session),
+        STORE,
     )
 
 
@@ -290,9 +309,10 @@ async def test_a_database_failure_rolls_the_batch_back_and_is_reraised(mocker):
     catalogue.upsert_episodes.side_effect = RuntimeError("db exploded")
     raw = create_autospec(RawTenraiRepository, instance=True)
     raw.get_batch.return_value = [
-        RawTenrai(mal_id=1, resource=Resource.EPISODES, payload=episodes(1), fetched_at=at(1))
+        RawTenrai(mal_id=1, resource=Resource.EPISODES, size_bytes=1, fetched_at=at(1))
     ]
-    job = CleanAnimeJob(catalogue, raw, create_autospec(MetricsRepository, instance=True))
+    put_payload(1, Resource.EPISODES, episodes(1))
+    job = CleanAnimeJob(catalogue, raw, create_autospec(MetricsRepository, instance=True), STORE)
 
     with pytest.raises(RuntimeError, match="db exploded"):
         await job._clean_anime(None, None, {}, {})
@@ -316,6 +336,44 @@ async def test_the_loop_cleans_everything_and_returns_the_totals(pg_session):
     assert summary["skipped_no_anime"] == summary["parse_failed"] == 0
     assert summary["elapsed_seconds"] >= 0
     assert await count(pg_session, Anime) == 2
+
+
+async def test_an_index_row_whose_object_is_missing_stops_the_run_and_is_recorded(pg_session):
+    await seed(pg_session, [(1, Resource.DETAILS, details(1))])
+    STORE.objects.clear()  # the index row exists but the object it points at does not
+
+    with pytest.raises(RawStoreError):
+        await make_job(pg_session).full_clean_loop()
+
+    run = await MetricsRepository(pg_session).latest_run("clean_anime")
+    assert run.status.value == "failed"
+    assert run.error.startswith("RawStoreError")
+    assert await count(pg_session, Anime) == 0
+
+
+async def test_the_payloads_of_a_batch_are_read_concurrently_but_no_more_than_the_limit(
+    pg_session,
+):
+    await seed(pg_session, [(n, Resource.DETAILS, details(n)) for n in range(1, 41)])
+    running = peak = 0
+    real_get = STORE.get
+
+    async def slow_get(mal_id, resource):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return await real_get(mal_id, resource)
+
+    STORE.get = slow_get
+    try:
+        summary = await make_job(pg_session).full_clean_loop()
+    finally:
+        del STORE.get  # back to the class method
+
+    assert summary["anime_changed"] == 40
+    assert 1 < peak <= clean_raw_job.RAW_STORE_CONCURRENCY
 
 
 async def test_the_loop_on_an_empty_table_does_nothing(pg_session):
@@ -372,6 +430,7 @@ async def test_a_failed_run_keeps_earlier_batches_and_can_be_resumed(pg_session)
         FailsOnItsSecondBatch(pg_session),
         RawTenraiRepository(pg_session),
         MetricsRepository(pg_session),
+        STORE,
     )
 
     with capture_logs() as logs, pytest.raises(RuntimeError, match="database went away"):
@@ -468,9 +527,9 @@ async def test_cleaning_the_same_rows_again_changes_no_tags_studios_or_links(pg_
 async def test_a_renamed_tag_is_updated_in_place(pg_session):
     await seed(pg_session, [tagged(1, genres=[named(1, "Action")])])
     await make_job(pg_session).full_clean_loop()
-    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
-    row.payload = tagged(1, genres=[named(1, "Action & Adventure")])[2]  # MAL renamed tag 1
-    await pg_session.commit()
+    put_payload(
+        1, Resource.DETAILS, tagged(1, genres=[named(1, "Action & Adventure")])[2]
+    )  # MAL renamed tag 1
 
     summary = await make_job(pg_session).full_clean_loop(full_pass=True)
 
@@ -482,9 +541,7 @@ async def test_a_renamed_tag_is_updated_in_place(pg_session):
 async def test_a_tag_the_source_dropped_is_unlinked_but_stays_in_the_tag_table(pg_session):
     await seed(pg_session, [tagged(1, genres=[ACTION, SCIFI])])
     await make_job(pg_session).full_clean_loop()
-    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
-    row.payload = tagged(1, genres=[ACTION])[2]
-    await pg_session.commit()
+    put_payload(1, Resource.DETAILS, tagged(1, genres=[ACTION])[2])
 
     summary = await make_job(pg_session).full_clean_loop(full_pass=True)
 
@@ -530,7 +587,9 @@ class CountsTheDictLoads(CatalogueRepository):
 async def test_the_tag_and_studio_dicts_are_loaded_once_per_run_not_once_per_batch(pg_session):
     await seed(pg_session, two_complete_anime())
     catalogue = CountsTheDictLoads(pg_session)
-    job = CleanAnimeJob(catalogue, RawTenraiRepository(pg_session), MetricsRepository(pg_session))
+    job = CleanAnimeJob(
+        catalogue, RawTenraiRepository(pg_session), MetricsRepository(pg_session), STORE
+    )
 
     summary = await job.full_clean_loop(batch_size=2)
 
@@ -558,6 +617,7 @@ async def test_a_batch_that_fails_leaves_the_dicts_and_the_database_unchanged(pg
         FailsOnStudioLinks(pg_session),
         RawTenraiRepository(pg_session),
         MetricsRepository(pg_session),
+        STORE,
     )
     tags, studios = {}, {}
 
@@ -649,9 +709,9 @@ async def test_cleaning_the_same_relations_again_changes_nothing_and_a_dropped_o
     unchanged = await make_job(pg_session).full_clean_loop(full_pass=True)
 
     assert unchanged["relation_links_changed"] == 0
-    row = (await pg_session.execute(select(RawTenrai))).scalar_one()
-    row.payload = with_relations(1, related("Sequel", (5, "anime")))[2]  # MAL dropped one
-    await pg_session.commit()
+    put_payload(
+        1, Resource.DETAILS, with_relations(1, related("Sequel", (5, "anime")))[2]
+    )  # MAL dropped one
 
     changed = await make_job(pg_session).full_clean_loop(full_pass=True)
 
@@ -735,6 +795,7 @@ async def test_a_failed_clean_run_is_recorded_with_where_to_resume(pg_session):
         FailsOnItsSecondBatch(pg_session),
         RawTenraiRepository(pg_session),
         MetricsRepository(pg_session),
+        STORE,
     )
 
     with pytest.raises(RuntimeError):
@@ -754,9 +815,8 @@ async def test_by_default_a_run_cleans_only_what_was_fetched_since_the_last_succ
     await seed(pg_session, [(1, Resource.DETAILS, details(1), 1)])
     first = await make_job(pg_session).full_clean_loop()
     assert first["since"] is None  # no earlier run: everything
-    pg_session.add(
-        RawTenrai(mal_id=2, resource=Resource.DETAILS, payload=details(2), fetched_at=future)
-    )
+    put_payload(2, Resource.DETAILS, details(2))
+    pg_session.add(RawTenrai(mal_id=2, resource=Resource.DETAILS, size_bytes=1, fetched_at=future))
     await pg_session.commit()
 
     second = await make_job(pg_session).full_clean_loop()
@@ -786,6 +846,7 @@ async def test_a_failed_run_does_not_move_the_cut_off(pg_session):
         FailsOnItsSecondBatch(pg_session),
         RawTenraiRepository(pg_session),
         MetricsRepository(pg_session),
+        STORE,
     )
     with pytest.raises(RuntimeError):
         await flaky.full_clean_loop(batch_size=4)

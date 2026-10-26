@@ -48,6 +48,18 @@ class CatalogueRepository:
         result = await self.db.execute(select(Anime.mal_id).where(Anime.mal_id == mal_id))
         return result.scalar_one_or_none() is not None
 
+    async def anime_ids_with_status(self, statuses: Iterable[str]) -> set[int]:
+        """The ids of the anime whose stored status is one of `statuses`, e.g. "Currently Airing".
+
+        These are MAL's own status texts as the parser stored them, not the `airing` / `upcoming`
+        words the Tenrai list endpoint takes.
+        """
+        statuses = list(statuses)
+        if not statuses:
+            return set()
+        result = await self.db.execute(select(Anime.mal_id).where(Anime.status.in_(statuses)))
+        return set(result.scalars().all())
+
     async def existing_anime_ids(self, ids: Iterable[int]) -> set[int]:
         """Which of these anime ids have a row, in one query. Meant for up to a few thousand ids."""
         ids = set(ids)

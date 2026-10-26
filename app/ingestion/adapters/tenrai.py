@@ -1,15 +1,23 @@
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 
 import httpx
 import structlog
 
-from app.ingestion.exceptions import GoneError, NetworkError, PermanentError, TransientError
+from app.ingestion.exceptions import (
+    AccessDeniedError,
+    GoneError,
+    NetworkError,
+    PermanentError,
+    TransientError,
+)
 from app.ingestion.utils.circuit_breaker import CircuitBreaker
 from app.ingestion.utils.rate_limiter import RateLimiter
 
 log = structlog.get_logger(__name__)
 RETRYABLE_STATUSES = {500, 502, 503, 504}
+ACCESS_DENIED_STATUSES = {401, 403}
 DEFAULT_RETRY_AFTER_S = 30.0
 USER_AGENT = "AnimePlanet https://github.com/Satveer27/Anime_App_Backend"
 
@@ -36,13 +44,22 @@ class TenraiAdapter:
         )
         self._breaker = breaker or CircuitBreaker()
         self._sleep = sleep
+        # Cumulative over the adapter's life; jobs report the difference over their run.
+        self.request_count = 0  # HTTP requests sent, retries included
+        self.retry_count = 0  # attempts after the first one of a call
+        self.rate_limited_count = 0
 
     @staticmethod
     def _retry_after(r: httpx.Response) -> float:
         try:
-            return float(r.headers.get("Retry-After", DEFAULT_RETRY_AFTER_S))
+            seconds = float(r.headers.get("Retry-After", DEFAULT_RETRY_AFTER_S))
         except ValueError:
             return DEFAULT_RETRY_AFTER_S
+        # The header comes from outside: nan, inf and negative values are unusable, and a huge
+        # one would stall the run while it holds the claimed task's lock.
+        if not math.isfinite(seconds) or seconds < 0:
+            return DEFAULT_RETRY_AFTER_S
+        return seconds
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -50,9 +67,12 @@ class TenraiAdapter:
     async def _fetch(self, endpoint: str, params: dict | None = None) -> dict:
         for attempt in range(1, self._max_attempts + 1):
             backoff = 2 ** (attempt - 1)
+            if attempt > 1:
+                self.retry_count += 1
 
             try:
                 await self._rate_limiter.acquire()
+                self.request_count += 1
                 r = await self._client.get(endpoint, params=params)
             except httpx.TransportError as e:
                 last_error = type(e).__name__
@@ -72,6 +92,7 @@ class TenraiAdapter:
                     last_status = 429
                     last_was_network = False
                     wait = self._retry_after(r)
+                    self.rate_limited_count += 1
                     log.warning(
                         "tenrai_rate_limited", endpoint=endpoint, wait_s=wait, attempt=attempt
                     )
@@ -90,6 +111,11 @@ class TenraiAdapter:
                 else:
                     if r.status_code == 404:
                         raise GoneError(f"404 {endpoint}", status_code=404)
+                    if r.status_code in ACCESS_DENIED_STATUSES:
+                        log.error("tenrai_access_denied", endpoint=endpoint, status=r.status_code)
+                        raise AccessDeniedError(
+                            f"{r.status_code} {endpoint}", status_code=r.status_code
+                        )
                     if r.status_code != 200:
                         raise PermanentError(
                             f"{r.status_code} {endpoint}", status_code=r.status_code

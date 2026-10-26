@@ -1,6 +1,8 @@
+import json
 from unittest.mock import create_autospec
 
 import pytest
+from raw_store_fake import InMemoryRawStore
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
@@ -8,13 +10,16 @@ from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
 from app.ingestion.enums.task_status_enum import TaskStatus
 from app.ingestion.exceptions import (
+    AccessDeniedError,
     CircuitOpenError,
     GoneError,
     PermanentError,
+    RawStoreError,
     RepeatedUnexpectedErrors,
     TransientError,
 )
 from app.ingestion.jobs.fetch_anime_job import (
+    MAX_CONSECUTIVE_DENIED,
     MAX_CONSECUTIVE_UNEXPECTED,
     MAX_EPISODE_PAGES,
     PROGRESS_EVERY_TASKS,
@@ -33,6 +38,9 @@ class FakeAdapter:
     def __init__(self, **responses):
         self.responses = responses
         self.episode_pages_requested = []
+        self.rate_limited_count = 0
+        self.request_count = 0
+        self.retry_count = 0
 
     def _answer(self, name):
         value = self.responses[name]
@@ -74,12 +82,12 @@ def metrics_repo(mocker):
     return repo
 
 
-def make_job(adapter, task_repo, raw_repo, resource=Resource.DETAILS, claim=True):
+def make_job(adapter, task_repo, raw_repo, resource=Resource.DETAILS, claim=True, raw_store=None):
     task_repo.claim_next.return_value = (
         IngestionTask(mal_id=5, resource=resource, attempts=0) if claim else None
     )
     metrics = create_autospec(MetricsRepository, instance=True)
-    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics)
+    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics, raw_store or InMemoryRawStore())
 
 
 @pytest.mark.parametrize(
@@ -98,7 +106,10 @@ async def test_single_page_resources_store_the_response_and_mark_done(
 
     await job.fetch_job_from_tasks()
 
-    raw_repo.upsert.assert_awaited_once_with(mal_id=5, resource=resource, payload=body)
+    assert job.raw_store.objects == {(5, resource): body}
+    raw_repo.upsert.assert_awaited_once_with(
+        mal_id=5, resource=resource, size_bytes=len(json.dumps(body))
+    )
     task_repo.mark_done.assert_awaited_once()
     task_repo.commit.assert_awaited_once()
 
@@ -111,20 +122,22 @@ async def test_episodes_are_stored_as_a_list_of_pages_following_has_next_page(ta
     ]
     adapter = FakeAdapter(episodes=pages)
 
-    await make_job(adapter, task_repo, raw_repo, Resource.EPISODES).fetch_job_from_tasks()
+    job = make_job(adapter, task_repo, raw_repo, Resource.EPISODES)
+    await job.fetch_job_from_tasks()
 
     assert adapter.episode_pages_requested == [1, 2, 3]
-    assert raw_repo.upsert.await_args.kwargs["payload"] == pages  # a list, not a JSON string
+    assert job.raw_store.objects[(5, Resource.EPISODES)] == pages  # a list, not a JSON string
     task_repo.mark_done.assert_awaited_once()
 
 
 async def test_episodes_without_pagination_are_a_single_page(task_repo, raw_repo):
     adapter = FakeAdapter(episodes={"data": []})
 
-    await make_job(adapter, task_repo, raw_repo, Resource.EPISODES).fetch_job_from_tasks()
+    job = make_job(adapter, task_repo, raw_repo, Resource.EPISODES)
+    await job.fetch_job_from_tasks()
 
     assert adapter.episode_pages_requested == [1]
-    assert raw_repo.upsert.await_args.kwargs["payload"] == [{"data": []}]
+    assert job.raw_store.objects[(5, Resource.EPISODES)] == [{"data": []}]
 
 
 async def test_a_failing_episodes_page_stores_nothing_and_marks_failed(task_repo, raw_repo):
@@ -197,6 +210,114 @@ async def test_circuit_open_releases_the_task_and_stops_without_using_an_attempt
     task_repo.mark_failed.assert_not_awaited()
     task_repo.mark_dead.assert_not_awaited()
     task_repo.commit.assert_not_awaited()
+
+
+async def test_access_denied_marks_the_task_failed_and_continues(task_repo, raw_repo):
+    adapter = FakeAdapter(full=AccessDeniedError("403 /anime/1/full", status_code=403))
+
+    outcome = await make_job(adapter, task_repo, raw_repo).fetch_job_from_tasks()
+
+    assert outcome.status is TaskStatus.FAILED
+    task_repo.mark_failed.assert_awaited_once()
+    task_repo.mark_dead.assert_not_awaited()
+    task_repo.commit.assert_awaited_once()
+
+
+async def test_repeated_access_denied_stops_the_loop(task_repo, raw_repo, metrics_repo):
+    tasks = [task(i) for i in range(MAX_CONSECUTIVE_DENIED + 5)]
+    adapter = FakeAdapter(full=AccessDeniedError("403", status_code=403))
+    job = loop_job(adapter, task_repo, raw_repo, metrics_repo, tasks)
+
+    with pytest.raises(AccessDeniedError):
+        await job.fetch_from_tasks()
+
+    assert task_repo.mark_failed.await_count == MAX_CONSECUTIVE_DENIED
+    recorded = metrics_repo.finish_run.await_args.args[2]
+    assert recorded["tasks"] == MAX_CONSECUTIVE_DENIED
+    assert recorded["stopped_by"] == "AccessDeniedError"
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        TransientError("503", status_code=503),
+        PermanentError("400", status_code=400),
+        GoneError("404", status_code=404),
+        ValueError("a bug of ours"),
+        None,  # a success
+    ],
+    ids=["transient", "permanent", "gone", "unexpected", "success"],
+)
+async def test_any_outcome_between_denials_resets_the_streak(
+    task_repo, raw_repo, metrics_repo, other
+):
+    """Only denials back to back count: 403, other, 403, other ... never reaches the limit."""
+
+    class Adapter(FakeAdapter):
+        async def get_full(self, mal_id):
+            if mal_id % 2:
+                raise AccessDeniedError("403", status_code=403)
+            if other is not None:
+                raise other
+            return {"data": {}}
+
+    tasks = [task(n) for n in range(1, MAX_CONSECUTIVE_DENIED * 4)]
+    job = loop_job(Adapter(), task_repo, raw_repo, metrics_repo, tasks)
+
+    summary = await job.fetch_from_tasks()  # does not raise AccessDeniedError
+
+    assert summary["tasks"] == len(tasks)
+
+
+async def test_a_success_resets_the_access_denied_count(task_repo, raw_repo, metrics_repo):
+    class Adapter(FakeAdapter):
+        async def get_full(self, mal_id):
+            if mal_id % MAX_CONSECUTIVE_DENIED == 0:
+                return {"data": {}}
+            raise AccessDeniedError("403", status_code=403)
+
+    tasks = [task(i) for i in range(1, MAX_CONSECUTIVE_DENIED * 3)]
+    job = loop_job(Adapter(), task_repo, raw_repo, metrics_repo, tasks)
+
+    summary = await job.fetch_from_tasks()
+
+    assert summary["tasks"] == len(tasks)
+    assert summary["done"] == 2
+
+
+async def test_a_raw_store_failure_releases_the_task_and_stops_without_using_an_attempt(
+    task_repo, raw_repo
+):
+    store = InMemoryRawStore()
+    store.fail_put = RawStoreError("put failed: AccessDenied")
+    job = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo, raw_store=store)
+
+    with pytest.raises(RawStoreError):
+        await job.fetch_job_from_tasks()
+
+    task_repo.rollback.assert_awaited_once()
+    raw_repo.upsert.assert_not_awaited()  # nothing points at an object that was never stored
+    task_repo.mark_failed.assert_not_awaited()
+    task_repo.mark_dead.assert_not_awaited()
+    task_repo.commit.assert_not_awaited()
+
+
+async def test_the_object_is_stored_before_its_index_row_is_written(task_repo, raw_repo):
+    order = []
+    store = InMemoryRawStore()
+    real_put = store.put
+
+    async def put(*args):
+        order.append("put")
+        return await real_put(*args)
+
+    store.put = put
+    raw_repo.upsert.side_effect = lambda **kwargs: order.append("upsert")
+    job = make_job(FakeAdapter(full={"data": {}}), task_repo, raw_repo, raw_store=store)
+
+    await job.fetch_job_from_tasks()
+
+    assert order == ["put", "upsert"]
 
 
 async def test_database_failure_rolls_back_and_reraises_without_marking(task_repo, raw_repo):
@@ -299,7 +420,7 @@ def loop_job(adapter, task_repo, raw_repo, metrics_repo, tasks):
     """tasks: what claim_next hands out in turn; the list running out means an empty queue."""
     task_repo.claim_next.side_effect = [*tasks, None]
     task_repo.count_by_status.return_value = queue(failed=2, done=len(tasks))
-    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics_repo)
+    return FetchAnimeJob(adapter, task_repo, raw_repo, metrics_repo, InMemoryRawStore())
 
 
 def task(mal_id, resource=Resource.DETAILS):
@@ -325,6 +446,7 @@ async def test_loop_drains_the_queue_and_records_a_succeeded_run(task_repo, raw_
     assert summary["by_resource"]["statistics"]["count"] == 1
     assert summary["stopped_by"] is None
     assert summary["queue_after"] == queue(failed=2, done=3)
+    assert summary["raw_bytes"] == 3 * len(json.dumps({"data": {}}))  # bytes stored
     for key in ("elapsed_seconds", "tasks_per_minute", "avg_task_ms", "max_task_seconds"):
         assert key in summary
     metrics_repo.start_run.assert_awaited_once_with("fetch_tasks")
@@ -474,7 +596,7 @@ async def test_the_summary_counts_the_tasks_that_succeeded_on_the_first_try(
     tasks = [attempt(1, 0), attempt(2, 0), attempt(3, 2), attempt(4, 0)]
     task_repo.claim_next.side_effect = [*tasks, None]
     task_repo.count_by_status.return_value = queue()
-    job = FetchAnimeJob(Adapter(), task_repo, raw_repo, metrics_repo)
+    job = FetchAnimeJob(Adapter(), task_repo, raw_repo, metrics_repo, InMemoryRawStore())
 
     summary = await job.fetch_from_tasks()
 
