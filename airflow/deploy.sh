@@ -48,7 +48,7 @@ echo "== 2. Building the image"
 $COMPOSE build
 
 echo "== 3. Recreating the containers"
-$COMPOSE up -d --force-recreate
+$COMPOSE up -d
 
 echo "== 4. Waiting for Airflow to answer"
 for _ in $(seq 1 60); do
