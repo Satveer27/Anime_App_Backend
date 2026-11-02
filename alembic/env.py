@@ -23,9 +23,7 @@ from app.config import settings
 from app.core.database.database import Base
 from app.ingestion.models import (  # noqa: F401
     AnimeImdbMatch,
-    ImdbEpisode,
     ImdbSnapshot,
-    ImdbTitle,
     IngestionRun,
     IngestionTask,
     RawTenrai,

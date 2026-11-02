@@ -127,41 +127,6 @@ class ImdbSnapshot(Base):
     )
 
 
-class ImdbTitle(Base):
-    """An IMDb animation title with its rating. A landing table, replaced by Spark each run."""
-
-    __tablename__ = "imdb_title"
-
-    tconst = Column(Text, primary_key=True)
-    # IMDb-controlled values (tvSeries, movie, ...), so no CHECK constraint (ADR 0018).
-    title_type = Column(Text, nullable=False)
-    primary_title = Column(Text, nullable=False)
-    original_title = Column(Text, nullable=True)
-    start_year = Column(Integer, nullable=True)
-    end_year = Column(Integer, nullable=True)
-    runtime_minutes = Column(Integer, nullable=True)
-    average_rating = Column(Numeric(3, 1), nullable=True)
-    num_votes = Column(Integer, nullable=True)
-
-
-class ImdbEpisode(Base):
-    """An episode of an IMDb title with its rating. A landing table, replaced each run."""
-
-    __tablename__ = "imdb_episode"
-
-    tconst = Column(Text, primary_key=True)
-    # Episodes of a title that is replaced or removed go with it.
-    parent_tconst = Column(
-        Text, ForeignKey("imdb_title.tconst", ondelete="CASCADE"), nullable=False
-    )
-    # IMDb leaves season and episode numbers out for some episodes.
-    season_number = Column(Integer, nullable=True)
-    episode_number = Column(Integer, nullable=True)
-    title = Column(Text, nullable=True)
-    average_rating = Column(Numeric(3, 1), nullable=True)
-    num_votes = Column(Integer, nullable=True)
-
-
 class AnimeImdbMatch(Base):
     """The matching decision for one anime: which IMDb title (and slice) it maps to, and why."""
 
@@ -172,8 +137,9 @@ class AnimeImdbMatch(Base):
     )
 
     anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), primary_key=True)
-    # No foreign key: the IMDb landing tables are replaced each run (ADR 0018). Null when the
-    # match is unmatched, or an override confirms there is no IMDb match.
+    # An IMDb id (for example tt0388629). There is no IMDb table to reference: the IMDb data is
+    # filtered and matched in memory and never stored (ADR 0019). Null when the match is
+    # unmatched, or an override confirms there is no IMDb match.
     imdb_tconst = Column(Text, nullable=True)
     season_number = Column(Integer, nullable=True)
     episode_from = Column(Integer, nullable=True)

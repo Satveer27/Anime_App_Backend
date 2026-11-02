@@ -6,7 +6,7 @@ from app.catalogue.models import Anime
 from app.ingestion.enums.match_method_enum import MatchMethod
 from app.ingestion.enums.match_status_enum import MatchStatus
 from app.ingestion.enums.snapshot_status_enum import SnapshotStatus
-from app.ingestion.models import AnimeImdbMatch, ImdbEpisode, ImdbSnapshot, ImdbTitle
+from app.ingestion.models import AnimeImdbMatch, ImdbSnapshot
 
 pytestmark = pytest.mark.postgres
 
@@ -70,34 +70,6 @@ async def test_snapshot_defaults_to_running_with_no_etags(pg_session):
     assert snapshot.finished_at is None
 
 
-async def test_episode_with_an_unknown_parent_is_rejected(pg_session):
-    pg_session.add(ImdbEpisode(tconst="tt2", parent_tconst="tt404"))
-    with pytest.raises(IntegrityError):
-        await pg_session.flush()
-
-
-async def test_deleting_a_title_deletes_its_episodes(pg_session):
-    pg_session.add_all(
-        [
-            ImdbTitle(tconst="tt1", title_type="tvSeries", primary_title="Show"),
-            ImdbTitle(tconst="tt9", title_type="tvSeries", primary_title="Other"),
-        ]
-    )
-    await pg_session.flush()
-    pg_session.add_all(
-        [
-            ImdbEpisode(tconst="tt2", parent_tconst="tt1"),
-            ImdbEpisode(tconst="tt3", parent_tconst="tt9"),
-        ]
-    )
-    await pg_session.flush()
-
-    await pg_session.execute(text("DELETE FROM imdb_title WHERE tconst = 'tt1'"))
-
-    remaining = (await pg_session.execute(select(ImdbEpisode.tconst))).scalars().all()
-    assert remaining == ["tt3"]
-
-
 async def test_deleting_an_anime_deletes_its_match_row(pg_session):
     await add_anime(pg_session, 1)
     await add_anime(pg_session, 2)
@@ -110,22 +82,10 @@ async def test_deleting_an_anime_deletes_its_match_row(pg_session):
     assert remaining == [2]
 
 
-async def test_episode_season_and_episode_numbers_accept_null(pg_session):
-    pg_session.add(ImdbTitle(tconst="tt1", title_type="tvSeries", primary_title="Show"))
-    await pg_session.flush()
-    pg_session.add(ImdbEpisode(tconst="tt2", parent_tconst="tt1"))
-    await pg_session.flush()
-
-    episode = (await pg_session.execute(select(ImdbEpisode))).scalar_one()
-
-    assert episode.season_number is None
-    assert episode.episode_number is None
-
-
 async def test_match_accepts_a_null_imdb_tconst_and_an_unknown_tconst(pg_session):
     await add_anime(pg_session, 1)
     await add_anime(pg_session, 2)
-    # No FK on imdb_tconst: the landing tables are replaced each run (ADR 0018).
+    # imdb_tconst references no table: the IMDb data is not stored (ADR 0019).
     pg_session.add_all(
         [
             match(1, imdb_tconst=None, status=MatchStatus.UNMATCHED),
