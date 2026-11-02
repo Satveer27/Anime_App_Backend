@@ -10,9 +10,6 @@
 ---
 x-airflow-common: &airflow-common
   image: ${AIRFLOW_IMAGE:-anime-airflow:local}
-  build:
-    context: ..
-    dockerfile: airflow/Dockerfile.prod
   env_file:
     - .env
   environment: &airflow-common-env
@@ -56,6 +53,11 @@ services:
   # One-off: create/upgrade Airflow's tables, the admin user and the one-slot pool (ADR 0012).
   airflow-init:
     <<: *airflow-common
+    # The only service with a build section: all of them share this image by name, so `docker
+    # compose build` builds it once instead of once per service.
+    build:
+      context: ..
+      dockerfile: airflow/Dockerfile.prod
     entrypoint: /bin/bash
     command:
       - -c
