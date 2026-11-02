@@ -1,9 +1,24 @@
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database.database import Base
+from app.ingestion.enums.match_method_enum import MatchMethod
+from app.ingestion.enums.match_status_enum import MatchStatus
 from app.ingestion.enums.resource_enum import Resource
 from app.ingestion.enums.run_status_enum import RunStatus
+from app.ingestion.enums.snapshot_status_enum import SnapshotStatus
 from app.ingestion.enums.task_status_enum import TaskStatus
 
 
@@ -84,3 +99,96 @@ class RawTenrai(Base):
     # index. Multi-page Resources (episodes) store every page as a list in that one object.
     size_bytes = Column(Integer, nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ImdbSnapshot(Base):
+    """One run of the IMDb download: the ETag and size of each file and how far the run got."""
+
+    __tablename__ = "imdb_snapshot"
+    __table_args__ = (
+        CheckConstraint(_in_list("status", SnapshotStatus), name="ck_imdb_snapshot_status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    # The files themselves are S3 objects; these identify the version that was downloaded.
+    basics_etag = Column(Text, nullable=True)
+    basics_size_bytes = Column(BigInteger, nullable=True)
+    episode_etag = Column(Text, nullable=True)
+    episode_size_bytes = Column(BigInteger, nullable=True)
+    ratings_etag = Column(Text, nullable=True)
+    ratings_size_bytes = Column(BigInteger, nullable=True)
+    status = Column(
+        Enum(
+            SnapshotStatus, native_enum=False, create_constraint=False, values_callable=_enum_values
+        ),
+        nullable=False,
+        server_default=SnapshotStatus.RUNNING.value,
+    )
+
+
+class ImdbTitle(Base):
+    """An IMDb animation title with its rating. A landing table, replaced by Spark each run."""
+
+    __tablename__ = "imdb_title"
+
+    tconst = Column(Text, primary_key=True)
+    # IMDb-controlled values (tvSeries, movie, ...), so no CHECK constraint (ADR 0018).
+    title_type = Column(Text, nullable=False)
+    primary_title = Column(Text, nullable=False)
+    original_title = Column(Text, nullable=True)
+    start_year = Column(Integer, nullable=True)
+    end_year = Column(Integer, nullable=True)
+    runtime_minutes = Column(Integer, nullable=True)
+    average_rating = Column(Numeric(3, 1), nullable=True)
+    num_votes = Column(Integer, nullable=True)
+
+
+class ImdbEpisode(Base):
+    """An episode of an IMDb title with its rating. A landing table, replaced each run."""
+
+    __tablename__ = "imdb_episode"
+
+    tconst = Column(Text, primary_key=True)
+    # Episodes of a title that is replaced or removed go with it.
+    parent_tconst = Column(
+        Text, ForeignKey("imdb_title.tconst", ondelete="CASCADE"), nullable=False
+    )
+    # IMDb leaves season and episode numbers out for some episodes.
+    season_number = Column(Integer, nullable=True)
+    episode_number = Column(Integer, nullable=True)
+    title = Column(Text, nullable=True)
+    average_rating = Column(Numeric(3, 1), nullable=True)
+    num_votes = Column(Integer, nullable=True)
+
+
+class AnimeImdbMatch(Base):
+    """The matching decision for one anime: which IMDb title (and slice) it maps to, and why."""
+
+    __tablename__ = "anime_imdb_match"
+    __table_args__ = (
+        CheckConstraint(_in_list("method", MatchMethod), name="ck_anime_imdb_match_method"),
+        CheckConstraint(_in_list("status", MatchStatus), name="ck_anime_imdb_match_status"),
+    )
+
+    anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), primary_key=True)
+    # No foreign key: the IMDb landing tables are replaced each run (ADR 0018). Null when the
+    # match is unmatched, or an override confirms there is no IMDb match.
+    imdb_tconst = Column(Text, nullable=True)
+    season_number = Column(Integer, nullable=True)
+    episode_from = Column(Integer, nullable=True)
+    episode_to = Column(Integer, nullable=True)
+    score = Column(Numeric(5, 4), nullable=True)
+    method = Column(
+        Enum(MatchMethod, native_enum=False, create_constraint=False, values_callable=_enum_values),
+        nullable=False,
+    )
+    status = Column(
+        Enum(MatchStatus, native_enum=False, create_constraint=False, values_callable=_enum_values),
+        nullable=False,
+    )
+    # Top candidates with their feature scores, for audits of match quality.
+    candidates = Column(JSONB, nullable=True)
+    # The IMDb snapshot the decision was made against.
+    snapshot_id = Column(Integer, ForeignKey("imdb_snapshot.id"), nullable=True)
+    decided_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

@@ -21,7 +21,15 @@ from app.catalogue.models import (  # noqa: F401
 )
 from app.config import settings
 from app.core.database.database import Base
-from app.ingestion.models import IngestionRun, IngestionTask, RawTenrai  # noqa: F401
+from app.ingestion.models import (  # noqa: F401
+    AnimeImdbMatch,
+    ImdbEpisode,
+    ImdbSnapshot,
+    ImdbTitle,
+    IngestionRun,
+    IngestionTask,
+    RawTenrai,
+)
 from app.security.models import RefreshToken  # noqa: F401
 from app.users.models import User  # noqa: F401
 
