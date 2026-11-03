@@ -321,3 +321,18 @@ ADR 0012 projected about 41.5 KB of uncompressed JSON per anime. The stored obje
 | Defect found | The two clean tasks ran at the same time (they were outside the pool). Fixed by putting clean in the one-slot pool |
 
 `requests_per_minute` above 100 on very short runs (101 to 121 on the discovery lists) is an artefact: the first request has no wait, so a run of two or three requests overstates the rate. Judge the rate only over runs longer than a minute.
+
+## 6. The first IMDb download and archive (issue #40), 3 Nov 2026
+
+Run from a developer laptop (Airflow in Docker, `imdb_weekly` DAG, task `download`) against `datasets.imdbws.com`, S3 and a local Postgres. The figures come from the task log and the `imdb_snapshot` row. This is a first run, so there is nothing to compare against. The download and upload times are from a home connection and say little about the Oracle box. `download_seconds` includes the gzip integrity check.
+
+| File | Bytes (compressed) | MiB | Download | Upload |
+|---|---|---|---|---|
+| `title.basics` | 229,636,410 | 219.0 | 18.6 s | 16.38 s |
+| `title.episode` | 55,297,201 | 52.7 | 4.62 s | 6.05 s |
+| `title.ratings` | 8,733,444 | 8.3 | 0.44 s | 0.81 s |
+| **Total** | **293,667,055** | **280.1** | 23.7 s | 23.2 s |
+
+The whole run took **47.6 s**. The three objects are the snapshot's size in S3: 293,667,055 bytes under `imdb/2026-11-03T052847Z/`, and the `imdb_snapshot` row holds the same three sizes and the ETag of each file.
+
+Second run, straight after (the files had not changed): the three `HEAD` requests matched the ETags of the archived snapshot, so the run recorded a `skipped` row, downloaded and uploaded nothing, and exited with code 99 in **0.33 s**.
