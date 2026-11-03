@@ -44,9 +44,9 @@ IMDb's bulk files are filtered to animation with PySpark and matched to MAL Anim
 - **Decisive numbers:** precision of auto-accepted Matches (series and slice both correct; target at least 97%, ADR 0002) and coverage, reported separately. Recall, review rate and unmatched rate are tracked too, with confidence intervals. The review and unmatched rates are health signals on every run: they measure caution, not correctness.
 
 **DAG `imdb_weekly`** (Monday 03:00 UTC, `catchup=False`, `max_active_runs=1`)
-1. `download` (pool `imdb`): fetch, archive, write `imdb_snapshot`; skip the rest if unchanged and no load is pending (see "Is a load needed?"). Retries 3 times, 10 minute backoff.
-2. `match` (pool `imdb`, then `tenrai` for the writes): Spark filters, the result is matched in memory, and `anime_imdb_match` and the `imdb_score` values are written. Scores anime with no Match yet and anime in `review` or `unmatched`. `accepted` and `override` rows are left alone unless their `tconst` is no longer in the data. Recorded as an `ingestion_run` with job `imdb_match`. Retries once.
-- **New pool `imdb`** (one slot) for download and Spark, which do not touch the catalogue. `match` and `score` use the existing `tenrai` pool so they queue behind any fetch or clean (ADR 0017). No sensors. Each task logs a summary with structlog.
+1. `download` (pool `tenrai`): fetch, archive, write `imdb_snapshot`; skip the rest if unchanged and no load is pending (see "Is a load needed?"). Retries 3 times, 10 minute backoff.
+2. `match` (pool `tenrai`): Spark filters, the result is matched in memory, and `anime_imdb_match` and the `imdb_score` values are written. Scores anime with no Match yet and anime in `review` or `unmatched`. `accepted` and `override` rows are left alone unless their `tconst` is no longer in the data. Recorded as an `ingestion_run` with job `imdb_match`. Retries once.
+- **One shared pool, `tenrai`** (one slot, ADR 0017) for every task of every pipeline, IMDb included. The box has 1 OCPU and 6 GB, so jobs wait for one another instead of competing for the core and the memory; a Spark run cannot overlap a fetch. No sensors. Each task logs a summary with structlog.
 - **First run:** the same DAG, triggered by hand, matches the whole catalogue. Later runs handle the delta.
 
 **Security and failure modes**
