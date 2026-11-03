@@ -20,6 +20,18 @@ class AccessDeniedError(AdapterError):
     the run stops."""
 
 
+class UntrustedSourceError(PermanentError):
+    """The request would leave the one allowed host or scheme (a redirect, a non-HTTPS URL)."""
+
+
+class DownloadTooLargeError(PermanentError):
+    """A file is bigger than the size cap, by its Content-Length or by the bytes received."""
+
+
+class CorruptDownloadError(PermanentError):
+    """A downloaded file is truncated or fails the gzip integrity check."""
+
+
 class TransientError(AdapterError):
     """5xx, 429 or network errors that outlasted the quick retries."""
 
