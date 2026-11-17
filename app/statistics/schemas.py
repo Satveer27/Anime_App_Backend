@@ -108,8 +108,8 @@ class PolarizationSchema(BaseModel):
     standard_deviation: float | None = Field(
         default=None, description="Population standard deviation of the votes"
     )
-    low_vote_share: float | None = Field(default=None, description="Share of 1-4 votes, 0-100")
-    high_vote_share: float | None = Field(default=None, description="Share of 9-10 votes, 0-100")
+    low_vote_share: float | None = Field(default=None, description="Share of 1-4 votes, 0-1")
+    high_vote_share: float | None = Field(default=None, description="Share of 9-10 votes, 0-1")
 
 
 class EngagementSchema(BaseModel):
