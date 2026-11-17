@@ -13,6 +13,10 @@ from sqlalchemy import (
 
 from app.core.database.database import Base
 
+# MAL's own status texts, as stored on `anime.status`.
+STATUS_AIRING = "Currently Airing"
+STATUS_NOT_YET_AIRED = "Not yet aired"
+
 
 class Anime(Base):
     """One MAL entry. Single-valued fields and name lists; related rows live in child tables."""

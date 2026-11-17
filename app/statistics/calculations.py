@@ -7,11 +7,8 @@ zero. Shared with the platform-wide aggregates so a rate means the same thing ev
 from collections.abc import Sequence
 from math import sqrt
 
+from app.catalogue.models import STATUS_AIRING, STATUS_NOT_YET_AIRED
 from app.statistics.schemas import ListStatusSchema, ScoreBucketSchema, ScoreDistributionSchema
-
-# MAL's own status texts, as stored on `anime.status`.
-STATUS_AIRING = "Currently Airing"
-STATUS_NOT_YET_AIRED = "Not yet aired"
 
 SCORES = range(1, 11)
 LOW_SCORES = range(1, 5)
