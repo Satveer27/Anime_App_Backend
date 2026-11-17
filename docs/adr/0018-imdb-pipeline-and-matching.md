@@ -1,6 +1,6 @@
 # IMDb ratings come from a weekly Spark job, matched to MAL in memory and recorded in one Match table
 
-**Status: draft.** Not accepted until the owner has reviewed it. **Superseded in part by ADR 0019**: the IMDb data is filtered and matched in memory and is not stored in Postgres, so there are no `imdb_title` or `imdb_episode` tables, no staging or swap, and no `pg_trgm` candidate query. Where this text still says otherwise, ADR 0019 wins.
+**Status: superseded by ADR 0020 (IMDb is dropped).** **Superseded in part by ADR 0019**: the IMDb data is filtered and matched in memory and is not stored in Postgres, so there are no `imdb_title` or `imdb_episode` tables, no staging or swap, and no `pg_trgm` candidate query. Where this text still says otherwise, ADR 0019 wins.
 
 IMDb's bulk files are filtered to animation with PySpark and matched to MAL Anime in memory, and the Matches write `imdb_score` into `anime` and `episode`. This fills the IMDb part left open by ADR 0014 and refines the matching of ADR 0002 and the season handling of ADR 0003. The matching and scoring code is written by the owner; this ADR fixes the design only.
 

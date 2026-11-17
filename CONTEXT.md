@@ -19,7 +19,7 @@ A connected group of Anime linked by Sequel, Prequel, Parent story or Side story
 _Avoid_: Series, universe
 
 **Main line**:
-The chain of TV Anime linked by Sequel and Prequel relations within a Franchise. A Franchise with several unrelated roots has several Main lines.
+The chain of TV Anime linked by Sequel and Prequel relations within a Franchise. A Franchise with several unrelated roots has several Main lines. No consumer for now: "does it get good" runs on one MAL entry (ADR 0020).
 _Avoid_: Canon, core story
 
 **Side line**:
@@ -73,11 +73,11 @@ Re-fetching only part of the Catalogue: weekly for the Active tier, and monthly 
 _Avoid_: Sync, update
 
 **Match**:
-A link between an IMDb series and a MAL Anime, with a confidence score.
+A link between an IMDb series and a MAL Anime, with a confidence score. No consumer for now: IMDb is dropped (ADR 0020).
 _Avoid_: Mapping, join
 
 **Review queue**:
-The list of Matches too uncertain to accept automatically, waiting for an admin decision.
+The list of Matches too uncertain to accept automatically, waiting for an admin decision. No consumer for now (ADR 0020).
 _Avoid_: Moderation queue
 
 **Dead letter**:
