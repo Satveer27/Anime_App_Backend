@@ -3,6 +3,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     Text,
@@ -17,6 +18,9 @@ class Anime(Base):
     """One MAL entry. Single-valued fields and name lists; related rows live in child tables."""
 
     __tablename__ = "anime"
+    # The cohort percentile query filters on (type, year). Measured in METRICS.md section 7
+    # (ADR 0015): 11.5 ms down to 2-4 ms.
+    __table_args__ = (Index("ix_anime_type_year", "type", "year"),)
 
     mal_id = Column(Integer, primary_key=True, autoincrement=False)  # mal_id
     title = Column(Text, nullable=False)
@@ -154,6 +158,9 @@ class Review(Base):
     """A MAL review as returned on page 1 (most helpful first, spoiler-free by default)."""
 
     __tablename__ = "review"
+    # "Reviews of this anime" scanned all 87,493 rows. Measured in METRICS.md section 7
+    # (ADR 0015): 23.1 ms down to 0.06 ms.
+    __table_args__ = (Index("ix_review_anime_id", "anime_id"),)
 
     mal_id = Column(Integer, primary_key=True, autoincrement=False)
     anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), nullable=False)

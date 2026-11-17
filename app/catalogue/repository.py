@@ -1,7 +1,8 @@
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import case, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,34 @@ from app.catalogue.models import (
 )
 
 ROWS_PER_STATEMENT = 500
+
+
+@dataclass(frozen=True)
+class CohortStanding:
+    """Where one anime stands among the anime of the same `type` and `year`.
+
+    `cohort_size` counts every anime in the cohort. Each metric is ranked only among the
+    cohort rows that have a value for it, and `*_count` says how many those are, so the caller
+    can decide whether a cohort is too small. A metric is None when this anime has no value for
+    it. Ranks start at 1 for the best; a percentile is the share of the cohort the anime beats
+    (0-1, higher is better) and follows the metric's own direction (a low popularity rank is
+    good).
+    """
+
+    cohort_size: int
+    score_count: int
+    score_rank: int | None
+    score_percentile: float | None
+    popularity_count: int
+    popularity_rank: int | None
+    popularity_percentile: float | None
+    favorites_count: int
+    favorites_rank: int | None
+    favorites_percentile: float | None
+
+
+def _as_float(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def _set_columns(obj) -> dict:
@@ -162,6 +191,146 @@ class CatalogueRepository:
         because it means "last seen" (ADR 0014).
         """
         return await self._upsert(Review, [_set_columns(review) for review in reviews])
+
+    # --- reads for the statistics endpoint ---------------------------------------------------
+
+    async def get_anime_with_statistics(
+        self, mal_id: int
+    ) -> tuple[Anime, AnimeStatisticsMal | None] | None:
+        """The anime and its statistics row (None if it has none), or None if no such anime."""
+        result = await self.db.execute(
+            select(Anime, AnimeStatisticsMal)
+            .outerjoin(AnimeStatisticsMal, AnimeStatisticsMal.anime_id == Anime.mal_id)
+            .where(Anime.mal_id == mal_id)
+        )
+        row = result.one_or_none()
+        return None if row is None else (row[0], row[1])
+
+    async def get_tags_of_anime(self, mal_id: int) -> list[Tag]:
+        result = await self.db.execute(
+            select(Tag)
+            .join(AnimeTag, AnimeTag.tag_id == Tag.mal_id)
+            .where(AnimeTag.anime_id == mal_id)
+            .order_by(Tag.name)
+        )
+        return list(result.scalars().all())
+
+    async def get_studios_of_anime(self, mal_id: int) -> list[Studio]:
+        result = await self.db.execute(
+            select(Studio)
+            .join(AnimeStudio, AnimeStudio.studio_id == Studio.mal_id)
+            .where(AnimeStudio.anime_id == mal_id)
+            .order_by(Studio.name)
+        )
+        return list(result.scalars().all())
+
+    async def get_reviews_of_anime(self, mal_id: int) -> list[Review]:
+        """Every stored review, most helpful first (reviews without a count go last)."""
+        result = await self.db.execute(
+            select(Review)
+            .where(Review.anime_id == mal_id)
+            .order_by(Review.reaction_overall.desc().nulls_last(), Review.mal_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_cohort_standing(
+        self, mal_id: int, type_: str | None, year: int | None
+    ) -> CohortStanding | None:
+        """Rank one anime among those with the same `type` and `year`, in one query.
+
+        Returns None if the anime has no type or year (so no cohort) or does not exist. Score
+        and favorites per member rank high to low; popularity ranks by MAL's popularity rank
+        (1 is the most popular). Each metric is ranked only among cohort rows that have a value:
+        every window is partitioned on "value is missing", so the missing rows form their own
+        partition and never shift the others' ranks or percentiles.
+        """
+        if type_ is None or year is None:
+            return None
+
+        favorites_per_member = Anime.favorites_mal * 1.0 / func.nullif(Anime.members_mal, 0)
+        score_missing = Anime.mal_score.is_(None)
+        popularity_missing = Anime.popularity_mal.is_(None)
+        favorites_missing = favorites_per_member.is_(None)
+
+        cohort = (
+            select(
+                Anime.mal_id.label("mal_id"),
+                func.count().over().label("cohort_size"),
+                func.count(Anime.mal_score).over().label("score_count"),
+                func.count(Anime.popularity_mal).over().label("popularity_count"),
+                func.count(favorites_per_member).over().label("favorites_count"),
+                score_missing.label("score_missing"),
+                popularity_missing.label("popularity_missing"),
+                favorites_missing.label("favorites_missing"),
+                func.rank()
+                .over(partition_by=score_missing, order_by=Anime.mal_score.desc())
+                .label("score_rank"),
+                func.percent_rank()
+                .over(partition_by=score_missing, order_by=Anime.mal_score.asc())
+                .label("score_percentile"),
+                func.rank()
+                .over(partition_by=popularity_missing, order_by=Anime.popularity_mal.asc())
+                .label("popularity_rank"),
+                # A bigger popularity rank number means less popular, so sort descending: the
+                # most popular anime comes last and gets the highest percentile.
+                func.percent_rank()
+                .over(partition_by=popularity_missing, order_by=Anime.popularity_mal.desc())
+                .label("popularity_percentile"),
+                func.rank()
+                .over(partition_by=favorites_missing, order_by=favorites_per_member.desc())
+                .label("favorites_rank"),
+                func.percent_rank()
+                .over(partition_by=favorites_missing, order_by=favorites_per_member.asc())
+                .label("favorites_percentile"),
+            )
+            .where(Anime.type == type_, Anime.year == year)
+            .cte("cohort")
+        )
+
+        def unless_missing(missing, value):
+            return case((missing, None), else_=value)
+
+        result = await self.db.execute(
+            select(
+                cohort.c.cohort_size,
+                cohort.c.score_count,
+                cohort.c.popularity_count,
+                cohort.c.favorites_count,
+                unless_missing(cohort.c.score_missing, cohort.c.score_rank),
+                unless_missing(cohort.c.score_missing, cohort.c.score_percentile),
+                unless_missing(cohort.c.popularity_missing, cohort.c.popularity_rank),
+                unless_missing(cohort.c.popularity_missing, cohort.c.popularity_percentile),
+                unless_missing(cohort.c.favorites_missing, cohort.c.favorites_rank),
+                unless_missing(cohort.c.favorites_missing, cohort.c.favorites_percentile),
+            ).where(cohort.c.mal_id == mal_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        (
+            cohort_size,
+            score_count,
+            popularity_count,
+            favorites_count,
+            score_rank,
+            score_percentile,
+            popularity_rank,
+            popularity_percentile,
+            favorites_rank,
+            favorites_percentile,
+        ) = row
+        return CohortStanding(
+            cohort_size=cohort_size,
+            score_count=score_count,
+            score_rank=score_rank,
+            score_percentile=_as_float(score_percentile),
+            popularity_count=popularity_count,
+            popularity_rank=popularity_rank,
+            popularity_percentile=_as_float(popularity_percentile),
+            favorites_count=favorites_count,
+            favorites_rank=favorites_rank,
+            favorites_percentile=_as_float(favorites_percentile),
+        )
 
     # --- transaction -----------------------------------------------------------------------
 
