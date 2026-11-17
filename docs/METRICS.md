@@ -336,3 +336,41 @@ Run from a developer laptop (Airflow in Docker, `imdb_weekly` DAG, task `downloa
 The whole run took **47.6 s**. The three objects are the snapshot's size in S3: 293,667,055 bytes under `imdb/2026-11-03T052847Z/`, and the `imdb_snapshot` row holds the same three sizes and the ETag of each file.
 
 Second run, straight after (the files had not changed): the three `HEAD` requests matched the ETags of the archived snapshot, so the run recorded a `skipped` row, downloaded and uploaded nothing, and exited with code 99 in **0.33 s**.
+
+## 7. Per-anime statistics endpoint, service timing and query plans (issue #51), 17 Nov 2026
+
+**Setup.** `analysis/bench_anime_statistics.py` runs the real `StatisticsService` (no HTTP layer) against RDS (db.t4g.micro, London) from the developer's laptop on a pooled connection. Read-only. Round trip `SELECT 1`: **16.0 ms median** (15.5 to 18.1). Tables: 23,086 anime, 23,086 statistics rows, 87,493 reviews, 68,081 `anime_tag`, 16,922 `anime_studio`. One warm-up call, then 15 timed calls per anime, one batch of runs, not repeated. The service makes **5 queries**, and `pool_pre_ping` adds one more round trip when a connection is checked out, so the first query shows about 2 round trips.
+
+**Service time per request, from the laptop (includes about 6 round trips of 16 ms)**
+
+| Anime | Response | Service median | p95 | Max | anime+stats / tags / studios / reviews / cohort (median ms) |
+|---|---|---|---|---|---|
+| Most popular in the biggest cohort (31964) | 102.5 KiB | **301.7 ms** | 338.8 | 439.2 | 32.0 / 16.0 / 16.1 / 153.0 / 26.8 |
+| Least popular in the biggest cohort (64594) | 2.2 KiB | 196.3 ms | 320.9 | 322.4 | 32.0 / 16.0 / 15.7 / 45.6 / 26.7 |
+| Most reviews (61990) | 70.1 KiB | 185.5 ms | 196.1 | 196.5 | 31.8 / 16.0 / 16.0 / 41.8 / 25.2 |
+| A cohort under 30 (80) | 110.1 KiB | 185.7 ms | 198.1 | 300.0 | 32.2 / 15.8 / 16.5 / 43.6 / 23.9 |
+
+JSON serialisation is 0.1 to 0.5 ms. The 153 ms reviews figure for the first anime is **unexplained**: it was the first sample run and was not repeated, and the other three anime with similarly large responses took 42 to 46 ms.
+
+**`EXPLAIN (ANALYZE, BUFFERS)` on the real tables, anime 31964 (cohort: TV 2016, 378 anime)**
+
+| Query | Execution time | Plan |
+|---|---|---|
+| anime + statistics | 0.074 ms | two primary-key index scans |
+| tags | 0.116 ms | `anime_tag` primary key, hash join to `tag` |
+| studios | 0.051 ms | `anime_studio` primary key, nested loop |
+| reviews | **23.127 ms** | `Seq Scan on review`, 87,473 rows removed by the filter, 11,633 buffers |
+| cohort | **11.460 ms** | `Seq Scan on anime` (7.5 ms of it) for `type = 'TV' AND year = 2016`, 378 rows, 2,425 buffers, then the window functions |
+
+The database spends about **35 ms** on the five queries. The rest of the 185 to 300 ms from the laptop is network.
+
+**Candidate indexes (ADR 0015).** `analysis/bench_statistics_indexes.py` copies `review` and `anime` into temporary tables on one connection, builds the index on the copy, and re-runs the exact statements the service sends, median of 9 `EXPLAIN ANALYZE` runs. The temporary copies are not comparable to the real tables for the reviews query: with no index the copy took 636 ms (temporary tables use small session-local buffers, so an 81.5 MiB scan goes to disk) against 23.1 ms on the real table. Only the cohort baseline matched (13.5 ms on the copy against 11.5 ms real).
+
+| Index | Query | Before (real table) | After (temporary copy) | Index size |
+|---|---|---|---|---|
+| `review (anime_id)` | reviews | 23.1 ms | **0.06 to 0.07 ms** | 824 KiB (table 81.5 MiB) |
+| `anime (type, year)` | cohort | 11.5 ms (copy 13.5 / 11.75) | **3.79 ms** (31964), **2.13 ms** (61990) | 184 KiB (table 17.0 MiB) |
+
+**Not measured:** the write cost of either index (ADR 0015 asks for insert and update throughput with and without), so neither index has been added. Timings from inside the same VPC. Behaviour under concurrent load. A Redis cache hit.
+
+**What this says about caching.** From the laptop, a request is 185 to 300 ms and most of it is round trips, which a deployed app next to RDS would not pay. The database's own work is about 35 ms, of which 34 ms is two sequential scans that the two indexes would turn into well under 1 ms and about 2 to 4 ms. That is a decision for the load test (#55), measured from the deployed app.
