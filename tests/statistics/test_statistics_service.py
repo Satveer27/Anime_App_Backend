@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -139,17 +140,49 @@ class TestCohort:
     ):
         await statistics_service.get_anime_statistics(1)
 
-        mock_catalogue_repository.get_cohort_standing.assert_awaited_once_with(1, "TV", 2025)
+        mock_catalogue_repository.get_cohort_standing.assert_awaited_once_with(1, "TV", 2025, 2025)
 
     async def test_ranks_and_percentiles_are_returned(self, statistics_service):
         cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
 
         assert cohort.type == "TV"
-        assert cohort.year == 2025
+        assert (cohort.year_from, cohort.year_to) == (2025, 2025)
         assert cohort.score.rank == 10
         assert cohort.score.percentile == 0.90
         assert cohort.popularity.percentile == 0.10
         assert cohort.favorites.rank == 5
+
+    async def test_drop_rate_and_completion_rate_get_their_own_rank_and_percentile(
+        self, statistics_service
+    ):
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert (cohort.drop_rate.rank, cohort.drop_rate.percentile) == (20, 0.80)
+        assert (cohort.completion_rate.rank, cohort.completion_rate.percentile) == (8, 0.92)
+
+    async def test_completion_rate_is_null_when_the_anime_has_none_such_as_while_airing(
+        self, statistics_service, mock_catalogue_repository, make_standing
+    ):
+        mock_catalogue_repository.get_cohort_standing.return_value = make_standing(
+            completion_rate_rank=None, completion_rate_percentile=None
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert cohort.completion_rate is None
+        assert cohort.drop_rate is not None
+
+    async def test_drop_rate_with_fewer_than_30_rows_is_null_but_the_rest_stay(
+        self, statistics_service, mock_catalogue_repository, make_standing
+    ):
+        mock_catalogue_repository.get_cohort_standing.return_value = make_standing(
+            drop_rate_count=12
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert cohort.drop_rate is None
+        assert cohort.score is not None
 
     async def test_a_metric_with_fewer_than_30_rows_is_null(
         self, statistics_service, mock_catalogue_repository, make_standing
@@ -214,6 +247,78 @@ class TestCohort:
         assert cohort.cohort_size == 0
         assert cohort.score is None
         assert cohort.is_hidden_gem is None
+
+
+class TestCohortYears:
+    """The cohort covers every year the anime aired, from its start year to the year it ended."""
+
+    async def test_a_finished_long_runner_uses_its_end_year(
+        self, statistics_service, mock_catalogue_repository, make_anime, make_statistics
+    ):
+        anime = make_anime(year=1999, aired_to=datetime(2006, 3, 1, tzinfo=UTC))
+        mock_catalogue_repository.get_anime_with_statistics.return_value = (
+            anime,
+            make_statistics(),
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        mock_catalogue_repository.get_cohort_standing.assert_awaited_once_with(1, "TV", 1999, 2006)
+        assert (cohort.year_from, cohort.year_to) == (1999, 2006)
+
+    async def test_a_show_still_airing_runs_to_the_current_year(
+        self, statistics_service, mock_catalogue_repository, make_anime, make_statistics, mocker
+    ):
+        mocker.patch("app.statistics.service._current_year", return_value=2031)
+        anime = make_anime(year=1999, status="Currently Airing", aired_to=None)
+        mock_catalogue_repository.get_anime_with_statistics.return_value = (
+            anime,
+            make_statistics(),
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert (cohort.year_from, cohort.year_to) == (1999, 2031)
+
+    async def test_a_show_with_no_end_date_that_is_not_airing_is_one_year(
+        self, statistics_service, mock_catalogue_repository, make_anime, make_statistics
+    ):
+        anime = make_anime(year=2011, status="Finished Airing", aired_to=None)
+        mock_catalogue_repository.get_anime_with_statistics.return_value = (
+            anime,
+            make_statistics(),
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert (cohort.year_from, cohort.year_to) == (2011, 2011)
+
+    async def test_an_end_date_before_the_start_year_never_shrinks_the_range(
+        self, statistics_service, mock_catalogue_repository, make_anime, make_statistics
+    ):
+        anime = make_anime(year=2011, aired_to=datetime(2010, 1, 1, tzinfo=UTC))
+        mock_catalogue_repository.get_anime_with_statistics.return_value = (
+            anime,
+            make_statistics(),
+        )
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert (cohort.year_from, cohort.year_to) == (2011, 2011)
+
+    async def test_no_start_year_gives_no_range(
+        self, statistics_service, mock_catalogue_repository, make_anime, make_statistics
+    ):
+        mock_catalogue_repository.get_anime_with_statistics.return_value = (
+            make_anime(year=None),
+            make_statistics(),
+        )
+        mock_catalogue_repository.get_cohort_standing.return_value = None
+
+        cohort = (await statistics_service.get_anime_statistics(1)).statistics.cohort
+
+        assert (cohort.year_from, cohort.year_to) == (None, None)
+        assert cohort.cohort_size == 0
 
 
 class TestHiddenGem:
