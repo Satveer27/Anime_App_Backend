@@ -1,3 +1,5 @@
 # No score history; selective refresh with an "as of" date
 
+**Amended by ADR 0021**: responses do not show an "as of" date. The rest of this ADR stands.
+
 Scores and statistics are overwritten on refresh, with no snapshots or rating history. Refreshes are tiered: the current season weekly, and monthly for this year's Anime plus the top ~1,000 by members. Older Anime are fetched once and documented as stale, and rankings show an "as of" date. A full refresh is a manual run, justified by measuring how much the top-50 rankings change. This keeps the request budget (100 requests a minute against Tenrai, ADR 0012) and storage small, at the cost of rankings that compare fresh against stale numbers for less popular titles.

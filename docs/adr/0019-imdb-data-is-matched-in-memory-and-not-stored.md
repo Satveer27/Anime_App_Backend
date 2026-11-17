@@ -1,6 +1,6 @@
 # IMDb data is filtered and matched in memory, and only the match decisions are stored
 
-**Status: draft.** Not accepted until the owner has reviewed it. Supersedes the landing-table parts of ADR 0018 and the `pg_trgm` candidate query of ADR 0002.
+**Status: superseded by ADR 0020 (IMDb is dropped).** Supersedes the landing-table parts of ADR 0018 and the `pg_trgm` candidate query of ADR 0002.
 
 ## Decision
 
