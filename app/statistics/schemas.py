@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -134,19 +135,32 @@ class CohortMetricSchema(BaseModel):
 
 
 class CohortSchema(BaseModel):
-    """This anime against all anime of the same `type` and `year`.
+    """This anime against all anime of the same `type` that started in the years it aired.
 
-    The metrics are null when the cohort is smaller than 30 or when the anime has no `type`
-    or `year`. `cohort_size` is always present so a null can be explained.
+    `year_from` is the anime's start year and `year_to` the year its run ended (the current
+    year while it is still airing), so a long runner is compared with everything that started
+    while it was on air. For a normal one-season show both are the same year. The metrics are
+    null when the cohort is smaller than 30 or when the anime has no `type` or `year`.
+    `cohort_size` is always present so a null can be explained.
     """
 
     type: str | None = None
-    year: int | None = None
+    year_from: int | None = None
+    year_to: int | None = None
     cohort_size: int
     score: CohortMetricSchema | None = None
     popularity: CohortMetricSchema | None = None
     favorites: CohortMetricSchema | None = Field(
         default=None, description="Favorites per member; high means a cult following"
+    )
+    drop_rate: CohortMetricSchema | None = Field(
+        default=None,
+        description="Drop rate, where a higher percentile means dropped LESS often than the "
+        "cohort (rank 1 has the lowest drop rate)",
+    )
+    completion_rate: CohortMetricSchema | None = Field(
+        default=None,
+        description="Completion rate; null while airing. Higher percentile = finished more often",
     )
     hidden_gem_gap: float | None = Field(
         default=None,
@@ -211,3 +225,162 @@ class AnimeStatisticsResponse(BaseModel):
     tags: list[TagSchema]
     studios: list[StudioSchema]
     reviews: ReviewsSchema
+
+
+# --- GET /api/v1/anime/{mal_id}/statistics/episodes (#52) ----------------------------------
+# One MAL entry (one season or cour) only, never a franchise (ADR 0020). Scores are MAL's
+# episode scores on a 0-10 scale; an episode with no score keeps a null score and is a gap.
+
+
+class Verdict(StrEnum):
+    GETS_GOOD = "gets_good"
+    CONSISTENTLY_GOOD = "consistently_good"
+    DECLINES = "declines"
+    FLAT = "flat"
+    INSUFFICIENT_DATA = "insufficient_data"
+
+
+class EpisodePointSchema(BaseModel):
+    episode_number: int
+    title: str | None = None
+    title_japanese: str | None = None
+    aired: datetime | None = None
+    synopsis: str | None = None
+    filler: bool
+    recap: bool
+    mal_score: float | None = Field(
+        default=None, description="Raw MAL score, 0-10; null = no score"
+    )
+    smoothed_score: float | None = Field(
+        default=None,
+        description="Moving average of the scored episodes, for the 'gets good' graph. Null where "
+        "the raw score is null, and for every episode when there is not enough data",
+    )
+
+
+class TrendSchema(BaseModel):
+    """The verdict and the numbers behind it. Only `scored_episodes` is set for too little data."""
+
+    verdict: Verdict
+    scored_episodes: int
+    baseline_size: int | None = Field(
+        default=None, description="How many of the first scored episodes make the baseline"
+    )
+    baseline: float | None = Field(default=None, description="Mean score of the baseline episodes")
+    threshold: float | None = Field(
+        default=None, description="baseline + 0.5: the line the score has to reach and stay above"
+    )
+    smoothing_window: int | None = Field(
+        default=None, description="Episodes in the moving average (5% of scored, at least 3)"
+    )
+    turning_point_episode: int | None = Field(
+        default=None,
+        description="gets_good only: the first episode from which the smoothed score stays above "
+        "the threshold until the end",
+    )
+    mean_after_turning_point: float | None = None
+    change: float | None = Field(
+        default=None, description="mean_after_turning_point - baseline (gets_good only)"
+    )
+    dips_after_turning_point: int | None = Field(
+        default=None, description="Smoothed points below the threshold after the turning point"
+    )
+    end_mean: float | None = Field(
+        default=None, description="Mean score of the last scored episodes (same count as baseline)"
+    )
+
+
+class SegmentSchema(BaseModel):
+    """A block of 200 episodes of a long series, so 'does it get good after 200' is visible."""
+
+    start_episode: int
+    end_episode: int
+    scored_episodes: int
+    mean_score: float
+    change_from_previous: float | None = None
+
+
+class YearlySchema(BaseModel):
+    """Episodes grouped by the year they aired, so a very long series fits on one graph."""
+
+    year: int
+    episode_count: int
+    scored_episodes: int
+    mean_score: float | None = None
+
+
+class ScoreExtremeSchema(BaseModel):
+    mal_score: float
+    episode_numbers: list[int] = Field(..., description="Every episode tied on this score")
+
+
+class FillerComparisonSchema(BaseModel):
+    """Scored filler against scored non-filler episodes; recap episodes count as neither."""
+
+    filler_episodes: int
+    filler_mean: float | None = None
+    non_filler_episodes: int
+    non_filler_mean: float | None = None
+
+
+class VolatilitySchema(BaseModel):
+    """How much the episode scores move. Needs at least 6 scored episodes."""
+
+    standard_deviation: float = Field(
+        ..., description="Spread of all the scores; also high for a show that simply rises"
+    )
+    mean_episode_change: float = Field(
+        ...,
+        description="Average jump between one scored episode and the next. High means a "
+        "rollercoaster, low means steady, whatever the overall trend",
+    )
+
+
+class HookSchema(BaseModel):
+    """How the season opens and closes against the rest. Needs at least 6 scored episodes."""
+
+    first_episodes: int = Field(..., description="How many opening episodes make the hook")
+    first_mean: float
+    rest_mean: float = Field(..., description="Mean of every scored episode after the hook")
+    hook_difference: float = Field(
+        ..., description="first_mean - rest_mean; positive = a strong open"
+    )
+    latest_episode: int = Field(
+        ..., description="The last scored episode: the finale once it has aired"
+    )
+    latest_score: float
+    latest_vs_rest: float = Field(
+        ..., description="latest_score minus the mean of all earlier scored episodes"
+    )
+
+
+class EpisodeBreakdownSchema(BaseModel):
+    """How much of the stored episode list is filler or recap.
+
+    Shares are 0-1 of every stored episode, scored or not. An episode flagged as both counts in
+    both; `regular_episodes` are the ones that are neither. Null shares when there are none.
+    """
+
+    total_episodes: int
+    filler_episodes: int
+    filler_share: float | None = None
+    recap_episodes: int
+    recap_share: float | None = None
+    regular_episodes: int
+    regular_share: float | None = None
+
+
+class EpisodeScoresResponse(BaseModel):
+    mal_id: int
+    episodes: list[EpisodePointSchema]
+    trend: TrendSchema
+    segments: list[SegmentSchema] = Field(
+        default_factory=list, description="Only for series longer than 200 episodes"
+    )
+    yearly: list[YearlySchema]
+    best: ScoreExtremeSchema | None = None
+    worst: ScoreExtremeSchema | None = None
+    filler_comparison: FillerComparisonSchema
+    breakdown: EpisodeBreakdownSchema
+    volatility: VolatilitySchema | None = None
+    hook: HookSchema | None = None

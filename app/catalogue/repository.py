@@ -2,11 +2,13 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import case, delete, func, select, tuple_
+from sqlalchemy import and_, case, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalogue.models import (
+    STATUS_AIRING,
+    STATUS_NOT_YET_AIRED,
     Anime,
     AnimeRelation,
     AnimeStatisticsMal,
@@ -23,7 +25,7 @@ ROWS_PER_STATEMENT = 500
 
 @dataclass(frozen=True)
 class CohortStanding:
-    """Where one anime stands among the anime of the same `type` and `year`.
+    """Where one anime stands among the anime of the same `type` that started in its airing years.
 
     `cohort_size` counts every anime in the cohort. Each metric is ranked only among the
     cohort rows that have a value for it, and `*_count` says how many those are, so the caller
@@ -43,6 +45,13 @@ class CohortStanding:
     favorites_count: int
     favorites_rank: int | None
     favorites_percentile: float | None
+    # Rank 1 is the lowest drop rate, so a higher percentile still means better.
+    drop_rate_count: int
+    drop_rate_rank: int | None
+    drop_rate_percentile: float | None
+    completion_rate_count: int
+    completion_rate_rank: int | None
+    completion_rate_percentile: float | None
 
 
 def _as_float(value) -> float | None:
@@ -233,104 +242,101 @@ class CatalogueRepository:
         )
         return list(result.scalars().all())
 
-    async def get_cohort_standing(
-        self, mal_id: int, type_: str | None, year: int | None
-    ) -> CohortStanding | None:
-        """Rank one anime among those with the same `type` and `year`, in one query.
+    async def get_episodes_of_anime(self, mal_id: int) -> list[Episode]:
+        """Every stored episode of one anime in episode order, scored or not."""
+        result = await self.db.execute(
+            select(Episode).where(Episode.anime_id == mal_id).order_by(Episode.episode_number)
+        )
+        return list(result.scalars().all())
 
-        Returns None if the anime has no type or year (so no cohort) or does not exist. Score
-        and favorites per member rank high to low; popularity ranks by MAL's popularity rank
-        (1 is the most popular). Each metric is ranked only among cohort rows that have a value:
-        every window is partitioned on "value is missing", so the missing rows form their own
-        partition and never shift the others' ranks or percentiles.
+    async def get_cohort_standing(
+        self, mal_id: int, type_: str | None, year_from: int | None, year_to: int | None
+    ) -> CohortStanding | None:
+        """Rank one anime among those of the same `type` that started in `year_from`..`year_to`.
+
+        The range is the years the anime itself aired, so a long runner is compared with
+        everything that started while it was on air. One query. The anime must fall inside the
+        range itself (its own start year is `year_from`).
+
+        Returns None if the anime has no type or year (so no cohort) or does not exist. Five
+        metrics are ranked (see `metrics` below for each one's direction). Each is ranked only
+        among cohort rows that have a value: every window is partitioned on "value is missing",
+        so the missing rows form their own partition and never shift the others' ranks or
+        percentiles.
         """
-        if type_ is None or year is None:
+        if type_ is None or year_from is None or year_to is None:
             return None
 
         favorites_per_member = Anime.favorites_mal * 1.0 / func.nullif(Anime.members_mal, 0)
-        score_missing = Anime.mal_score.is_(None)
-        popularity_missing = Anime.popularity_mal.is_(None)
-        favorites_missing = favorites_per_member.is_(None)
+        # The same rules as the list-status rates in the statistics service: members who
+        # started are total minus plan to watch, an anime that has not aired has no rates, and
+        # an airing one has no completion rate. No statistics row means NULL.
+        started = AnimeStatisticsMal.total - AnimeStatisticsMal.plan_to_watch
+        rates_known = Anime.status.is_distinct_from(STATUS_NOT_YET_AIRED)
+        drop_rate = case(
+            (rates_known, AnimeStatisticsMal.dropped * 1.0 / func.nullif(started, 0)),
+            else_=None,
+        )
+        completion_rate = case(
+            (
+                and_(rates_known, Anime.status.is_distinct_from(STATUS_AIRING)),
+                AnimeStatisticsMal.completed * 1.0 / func.nullif(started, 0),
+            ),
+            else_=None,
+        )
 
+        # name -> (value, higher_is_better). A better anime gets rank 1 and the highest
+        # percentile, so a low popularity rank number and a low drop rate count as better.
+        metrics = {
+            "score": (Anime.mal_score, True),
+            "popularity": (Anime.popularity_mal, False),
+            "favorites": (favorites_per_member, True),
+            "drop_rate": (drop_rate, False),
+            "completion_rate": (completion_rate, True),
+        }
+
+        columns = [Anime.mal_id.label("mal_id"), func.count().over().label("cohort_size")]
+        for name, (value, higher_is_better) in metrics.items():
+            missing = value.is_(None)
+            best_first = value.desc() if higher_is_better else value.asc()
+            columns += [
+                func.count(value).over().label(f"{name}_count"),
+                missing.label(f"{name}_missing"),
+                func.rank().over(partition_by=missing, order_by=best_first).label(f"{name}_rank"),
+            ]
         cohort = (
-            select(
-                Anime.mal_id.label("mal_id"),
-                func.count().over().label("cohort_size"),
-                func.count(Anime.mal_score).over().label("score_count"),
-                func.count(Anime.popularity_mal).over().label("popularity_count"),
-                func.count(favorites_per_member).over().label("favorites_count"),
-                score_missing.label("score_missing"),
-                popularity_missing.label("popularity_missing"),
-                favorites_missing.label("favorites_missing"),
-                func.rank()
-                .over(partition_by=score_missing, order_by=Anime.mal_score.desc())
-                .label("score_rank"),
-                func.percent_rank()
-                .over(partition_by=score_missing, order_by=Anime.mal_score.asc())
-                .label("score_percentile"),
-                func.rank()
-                .over(partition_by=popularity_missing, order_by=Anime.popularity_mal.asc())
-                .label("popularity_rank"),
-                # A bigger popularity rank number means less popular, so sort descending: the
-                # most popular anime comes last and gets the highest percentile.
-                func.percent_rank()
-                .over(partition_by=popularity_missing, order_by=Anime.popularity_mal.desc())
-                .label("popularity_percentile"),
-                func.rank()
-                .over(partition_by=favorites_missing, order_by=favorites_per_member.desc())
-                .label("favorites_rank"),
-                func.percent_rank()
-                .over(partition_by=favorites_missing, order_by=favorites_per_member.asc())
-                .label("favorites_percentile"),
-            )
-            .where(Anime.type == type_, Anime.year == year)
+            select(*columns)
+            .select_from(Anime)
+            .outerjoin(AnimeStatisticsMal, AnimeStatisticsMal.anime_id == Anime.mal_id)
+            .where(Anime.type == type_, Anime.year.between(year_from, year_to))
             .cte("cohort")
         )
 
-        def unless_missing(missing, value):
-            return case((missing, None), else_=value)
-
-        result = await self.db.execute(
-            select(
-                cohort.c.cohort_size,
-                cohort.c.score_count,
-                cohort.c.popularity_count,
-                cohort.c.favorites_count,
-                unless_missing(cohort.c.score_missing, cohort.c.score_rank),
-                unless_missing(cohort.c.score_missing, cohort.c.score_percentile),
-                unless_missing(cohort.c.popularity_missing, cohort.c.popularity_rank),
-                unless_missing(cohort.c.popularity_missing, cohort.c.popularity_percentile),
-                unless_missing(cohort.c.favorites_missing, cohort.c.favorites_rank),
-                unless_missing(cohort.c.favorites_missing, cohort.c.favorites_percentile),
-            ).where(cohort.c.mal_id == mal_id)
-        )
+        outer = [cohort.c.cohort_size]
+        for name in metrics:
+            count, rank, missing = (
+                cohort.c[f"{name}_{part}"] for part in ("count", "rank", "missing")
+            )
+            # The share of the cohort not ranked above this anime: rank 1 gives 1.0 and the last
+            # rank 0.0, and anime tied on a value share one rank and so one percentile. It comes
+            # from the rank, which saves a second sort per metric.
+            percentile = (count - rank) * 1.0 / func.nullif(count - 1, 0)
+            outer += [
+                count,
+                case((missing, None), else_=rank).label(f"{name}_rank"),
+                case((missing, None), else_=percentile).label(f"{name}_percentile"),
+            ]
+        result = await self.db.execute(select(*outer).where(cohort.c.mal_id == mal_id))
         row = result.one_or_none()
         if row is None:
             return None
-        (
-            cohort_size,
-            score_count,
-            popularity_count,
-            favorites_count,
-            score_rank,
-            score_percentile,
-            popularity_rank,
-            popularity_percentile,
-            favorites_rank,
-            favorites_percentile,
-        ) = row
-        return CohortStanding(
-            cohort_size=cohort_size,
-            score_count=score_count,
-            score_rank=score_rank,
-            score_percentile=_as_float(score_percentile),
-            popularity_count=popularity_count,
-            popularity_rank=popularity_rank,
-            popularity_percentile=_as_float(popularity_percentile),
-            favorites_count=favorites_count,
-            favorites_rank=favorites_rank,
-            favorites_percentile=_as_float(favorites_percentile),
-        )
+
+        fields = {"cohort_size": row.cohort_size}
+        for name in metrics:
+            fields[f"{name}_count"] = getattr(row, f"{name}_count")
+            fields[f"{name}_rank"] = getattr(row, f"{name}_rank")
+            fields[f"{name}_percentile"] = _as_float(getattr(row, f"{name}_percentile"))
+        return CohortStanding(**fields)
 
     # --- transaction -----------------------------------------------------------------------
 

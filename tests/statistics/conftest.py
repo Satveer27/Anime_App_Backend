@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.catalogue.models import Anime, AnimeStatisticsMal, Review, Studio, Tag
+from app.catalogue.models import Anime, AnimeStatisticsMal, Episode, Review, Studio, Tag
 from app.catalogue.repository import CatalogueRepository, CohortStanding
 from app.main import app
 from app.statistics.deps import create_statistics_service
@@ -71,6 +71,33 @@ def make_review():
 
 
 @pytest.fixture
+def make_episode():
+    def _make(number=1, score=None, **overrides):
+        fields = {
+            "anime_id": 1,
+            "episode_number": number,
+            "title": f"Episode {number}",
+            "mal_score": None if score is None else Decimal(str(score)),
+            "filler": False,
+            "recap": False,
+        }
+        fields.update(overrides)
+        return Episode(**fields)
+
+    return _make
+
+
+@pytest.fixture
+def make_episodes(make_episode):
+    """Episodes numbered 1..n from a list of scores; a None score is an unscored episode."""
+
+    def _make(scores):
+        return [make_episode(number, score) for number, score in enumerate(scores, start=1)]
+
+    return _make
+
+
+@pytest.fixture
 def make_standing():
     """A cohort standing; every metric defaults to a cohort of 100 where this anime is strong."""
 
@@ -86,6 +113,12 @@ def make_standing():
             "favorites_count": 100,
             "favorites_rank": 5,
             "favorites_percentile": 0.95,
+            "drop_rate_count": 100,
+            "drop_rate_rank": 20,
+            "drop_rate_percentile": 0.80,
+            "completion_rate_count": 100,
+            "completion_rate_rank": 8,
+            "completion_rate_percentile": 0.92,
         }
         fields.update(overrides)
         return CohortStanding(**fields)
@@ -102,6 +135,8 @@ def mock_catalogue_repository(mocker, make_anime, make_statistics, make_standing
     repository.get_studios_of_anime.return_value = [Studio(mal_id=2, name="Studio")]
     repository.get_reviews_of_anime.return_value = []
     repository.get_cohort_standing.return_value = make_standing()
+    repository.anime_exists.return_value = True
+    repository.get_episodes_of_anime.return_value = []
     return repository
 
 

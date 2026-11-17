@@ -374,3 +374,84 @@ The database spends about **35 ms** on the five queries. The rest of the 185 to 
 **Not measured:** the write cost of either index (ADR 0015 asks for insert and update throughput with and without), so neither index has been added. Timings from inside the same VPC. Behaviour under concurrent load. A Redis cache hit.
 
 **What this says about caching.** From the laptop, a request is 185 to 300 ms and most of it is round trips, which a deployed app next to RDS would not pay. The database's own work is about 35 ms, of which 34 ms is two sequential scans that the two indexes would turn into well under 1 ms and about 2 to 4 ms. That is a decision for the load test (#55), measured from the deployed app.
+
+## 8. Per-season "gets good" verdict, thresholds checked on real series (issue #52), 17 Nov 2026
+
+**Method.** `analysis/check_trend_thresholds.py` runs `compute_trend` (`app/statistics/trend.py`) over every anime on RDS that has a scored episode: **5,626 anime, 92,058 scored episodes** (112,257 episode rows, 20,199 with a null score). Read-only, one run per setting. 4,588 anime have the 6 scored episodes the verdict needs; 1,038 have 1 to 5 and get `insufficient_data`. Constants at the time: baseline = first 20% of scored episodes (at least 3, no cap), threshold = baseline + 0.5, moving average over 5% of the scored episodes (at least 3, odd), up to 10% of the points after the turning point may dip, `consistently_good` = baseline at least 7.5 and every smoothed point within 0.5, `declines` = last 20% of scored episodes at least 0.5 below the baseline.
+
+**First run, turning point allowed anywhere after the baseline:**
+
+| Verdict | Anime | Share |
+|---|---|---|
+| flat | 1,420 | 25.2% |
+| gets_good | 1,407 | 25.0% |
+| consistently_good | 1,392 | 24.7% |
+| insufficient_data | 1,038 | 18.5% |
+| declines | 369 | 6.6% |
+
+The `gets_good` turning point sat at a median of **0.67** of the way through the series (quartiles 0.38 / 0.86), and Cowboy Bebop turned at episode 24 of 26 and Code Geass at 24 of 25. A smoothed score that ends high "stays" above the line trivially, so a good finale alone counted as "gets good".
+
+**Change:** the turning point must leave at least as many episodes after it as the baseline has (`min_after = baseline size`). Second run:
+
+| Verdict | Anime | Share |
+|---|---|---|
+| flat | 1,928 | 34.3% |
+| consistently_good | 1,392 | 24.7% |
+| insufficient_data | 1,038 | 18.5% |
+| gets_good | 886 | **15.7%** |
+| declines | 382 | 6.8% |
+
+The turning point now sits at a median of **0.48** of the series (quartiles 0.27 / 0.67), with a median rise of +0.82 over the baseline. By length, `gets_good` is 16% for 1 to 13 scored episodes, 18% for 14 to 26, 12% for 27 to 100 and 5% for 100 or more; the 100+ group (61 anime) is 79% `flat`.
+
+**Well-known series (second run)**
+
+| Series | Scored | Verdict | Baseline (episodes) | End mean | Turning point |
+|---|---|---|---|---|---|
+| Steins;Gate | 24 | gets_good | 8.65 (5) | 9.56 | 8 |
+| Fullmetal Alchemist: Brotherhood | 64 | gets_good | 8.26 (13) | 9.10 | 40 |
+| Mob Psycho 100 | 12 | gets_good | 8.55 (3) | 9.28 | 8 |
+| Shingeki no Kyojin (S1) | 25 | consistently_good | 9.13 (5) | 9.37 | none |
+| Vinland Saga | 24 | consistently_good | 8.92 (5) | 9.34 | none |
+| Naruto | 220 | declines | 8.32 (44) | 7.58 | none |
+| One Piece | 1,176 | flat | 8.55 (235) | 8.92 | none |
+| Bleach | 366 | flat | 8.55 (73) | 8.28 | none |
+| Death Note | 35 | flat | 8.94 (7) | 8.71 | none |
+| Cowboy Bebop | 26 | flat (was gets_good, turning 24) | 8.64 (5) | 9.17 | none |
+| Code Geass | 21 | flat (was gets_good, turning 24) | 8.65 (4) | 9.10 | none |
+| Hunter x Hunter (2011) | 148 | flat (was gets_good, turning 123) | 8.51 (30) | 9.18 | none |
+
+**Findings and limits.**
+- The verdicts match what is commonly said about Steins;Gate, Brotherhood and Naruto, but this is a spot check by the author, not a labelled test set, so there is no precision figure.
+- A series that is only stronger in its last fifth (Hunter x Hunter, Cowboy Bebop, Code Geass) is now `flat`. Their `end_mean` is returned with the baseline, so the gap is visible, but the verdict does not say it.
+- With a baseline of 20% and no cap, a long series is mostly `flat` (One Piece's baseline is its first 235 episodes). For series over 200 episodes the `segments` block (200 episodes each) carries the information the verdict cannot.
+- Episode scores are coarse and missing for about 18% of the rows, so a verdict on a short season rests on few points.
+
+## 9. Cohort over the years an anime aired (issue #52), 17 Nov 2026
+
+The cohort used to be "same `type` and same start `year`", so One Piece (1999 to now, still airing) was compared with 110 TV anime from 1999. It is now every anime of the same `type` that started between the anime's start year and the year its run ended (the year of `aired_to`, the current year while it is airing, otherwise the start year). A one-season show still gets a single year.
+
+`analysis/bench_cohort_range.py` runs the real repository query on RDS (db.t4g.micro, London, from the developer's laptop, round trip about 16 ms). Both indexes from section 7 (`ix_anime_type_year`, `ix_review_anime_id`) were present on RDS, so these are with them. Warm-up, then 15 timed runs for the round trip and the median of 5 `EXPLAIN ANALYZE` runs for the database execution time; one batch of runs, not repeated. All five plans were a bitmap heap scan on `anime` using `ix_anime_type_year`.
+
+| Anime | Years | Cohort | Query round trip | Database execution |
+|---|---|---|---|---|
+| Steins;Gate | 2011 | 322 | 20.7 ms | 3.46 ms |
+| Boku no Hero Academia | 2016 | 378 | 21.5 ms | 3.94 ms |
+| Naruto | 2002 to 2007 | 978 | 28.0 ms | 9.98 ms |
+| Gintama | 2006 to 2010 | 1,195 | 28.2 ms | 11.82 ms |
+| One Piece | 1999 to 2026 | 7,080 | 79.9 ms | 70.25 ms |
+
+A one-season show is unchanged (the 3.5 to 3.9 ms matches the 2.1 to 3.8 ms measured on temporary copies in section 7). The cost grows with the cohort: One Piece's query sorts 7,080 rows through eight window functions and takes 70 ms in the database, about twice the whole endpoint's earlier database time. Its position is more meaningful than before: #37 of 7,080 on score (99th percentile) and #16 on popularity, against #1 of 110 before. This is the strongest case so far for caching the per-anime response (#55), since the long runners are the most visited and the slowest.
+
+**Filler and recap flags (same day, RDS, one query).** Of 112,257 stored episodes across 5,880 anime, **2,741 (2.4%) are flagged filler** and **298 (0.27%) recap**; none is both. Only **176 anime** (3.0% of those with episodes) have any filler flag and 161 any recap flag, so the flags are rare and concentrated in long shonen series. Examples: One Piece 97 of 1,180 filler (8.2%) and 7 recap (0.6%), Naruto 89 of 220 filler (40.5%), Steins;Gate none. The flags come from MAL's episode list, so an unflagged episode is not proven canon.
+
+**Cohort with drop-rate and completion-rate percentiles (same day, same method as above).** The cohort query now joins `anime_statistics_mal` and ranks five metrics (score, popularity, favorites per member, drop rate, completion rate) instead of three. The first version sorted every metric twice (a rank and a percent rank) and took **11.07 ms** for Steins;Gate and **152.12 ms** for One Piece in the database, against 3.46 ms and 70.25 ms with three metrics. The plan was an index scan on `anime` (0.3 ms for 322 rows), a hash join that reads all 23,086 statistics rows (about 2 ms), then the window sorts. Deriving the percentile from the rank, `(count - rank) / (count - 1)`, halves the sorts, and the query takes:
+
+| Anime | Cohort | 3 metrics (section 9) | 5 metrics, two sorts each | **5 metrics, one sort each** |
+|---|---|---|---|---|
+| Steins;Gate | 322 | 3.46 ms | 11.07 ms | **8.58 ms** |
+| Boku no Hero Academia | 378 | 3.94 ms | 12.52 ms | **9.40 ms** |
+| Naruto | 978 | 9.98 ms | 24.69 ms | **17.99 ms** |
+| Gintama | 1,195 | 11.82 ms | 28.42 ms | **20.31 ms** |
+| One Piece | 7,080 | 70.25 ms | 152.12 ms | **105.12 ms** |
+
+The two extra metrics cost about 5 ms for a one-season show and 35 ms for One Piece. Percentiles are unchanged for these anime; the difference is only in ties, where tied anime now share one rank and one percentile (the percentile is the share of the cohort not ranked above the anime, so ties count as beaten). The per-anime response is the next thing to cache or precompute (#55).
