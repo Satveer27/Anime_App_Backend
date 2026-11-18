@@ -91,7 +91,6 @@ def all_none_args(**overrides):
         "tag_match": TagMatch.ALL,
         "studio_id": None,
         "release_status": None,
-        "released_days": None,
         "min_score": None,
         "min_ratings": None,
         "sort": None,

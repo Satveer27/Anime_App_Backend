@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 
-from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE, MAX_RELEASED_DAYS
+from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE
 from app.anime.option_schemas import (
     FilterOptionsResponse,
     LimitsSchema,
@@ -117,7 +117,6 @@ class TestFilterOptions:
         assert (result.years.min, result.years.max) == (1917, 2028)
         assert result.limits.max_page_size == MAX_PAGE_SIZE == 100
         assert result.limits.max_filter_values == MAX_FILTER_VALUES == 10
-        assert result.limits.max_released_days == MAX_RELEASED_DAYS == 60
         assert values(result.types)[0] == "tv"
 
     async def test_an_empty_catalogue_is_not_an_error(self, options_service):
@@ -199,7 +198,7 @@ def options_response() -> FilterOptionsResponse:
         orders=[option],
         tag_matches=[option],
         years=YearRangeSchema(min=1917, max=2028),
-        limits=LimitsSchema(max_page_size=100, max_filter_values=10, max_released_days=60),
+        limits=LimitsSchema(max_page_size=100, max_filter_values=10),
         tags=[TagOptionSchema(tag_id=1, name="Action", anime_count=10)],
     )
 

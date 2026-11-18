@@ -89,8 +89,6 @@ class AnimeFilters:
     tag_match_all: bool = True
     studio_ids: tuple[int, ...] = ()
     release_status: ReleaseStatus | None = None
-    # Keep anime that released an episode on or after this moment (the start of a UTC day).
-    released_since: datetime | None = None
     min_score: float | None = None
     min_ratings: int | None = None
 
@@ -202,14 +200,6 @@ class CatalogueReadRepository:
             )
         if filters.release_status is not None:
             conditions.append(self._release_condition(filters.release_status))
-        if filters.released_since is not None:
-            conditions.append(
-                exists().where(
-                    Episode.anime_id == Anime.mal_id,
-                    Episode.aired <= func.now(),
-                    Episode.aired >= filters.released_since,
-                )
-            )
         if filters.min_score is not None:
             conditions.append(Anime.mal_score >= filters.min_score)
         if filters.min_ratings is not None:

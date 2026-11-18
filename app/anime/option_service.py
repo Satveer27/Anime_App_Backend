@@ -1,6 +1,6 @@
 import structlog
 
-from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE, MAX_RELEASED_DAYS
+from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE
 from app.anime.option_schemas import (
     FilterOptionsResponse,
     LimitsSchema,
@@ -95,11 +95,7 @@ class OptionsService:
         return FilterOptionsResponse(
             **fixed_options(),
             years=YearRangeSchema(min=year_min, max=year_max),
-            limits=LimitsSchema(
-                max_page_size=MAX_PAGE_SIZE,
-                max_filter_values=MAX_FILTER_VALUES,
-                max_released_days=MAX_RELEASED_DAYS,
-            ),
+            limits=LimitsSchema(max_page_size=MAX_PAGE_SIZE, max_filter_values=MAX_FILTER_VALUES),
             tags=[TagOptionSchema(**tag) for tag in tags],
         )
 

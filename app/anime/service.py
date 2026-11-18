@@ -1,5 +1,3 @@
-from datetime import UTC, date, datetime, time, timedelta
-
 import structlog
 
 from app.anime.schemas import AnimeListItemSchema, AnimeListResponse
@@ -25,23 +23,6 @@ from app.exceptions import BadRequestError
 logger = structlog.get_logger()
 
 
-def _utc_today() -> date:
-    return datetime.now(UTC).date()
-
-
-def released_since(days: int | None, today: date) -> datetime | None:
-    """The start of the window for "released in the last `days` days", or None for no filter.
-
-    Counted in calendar days, today included: 7 days is today and the six before it, so on a
-    Sunday it is Monday to Sunday, and the episode that aired the Sunday before belongs to the
-    previous week. Episode air dates are whole days at midnight UTC, so a rolling 7 x 24 hours
-    would drop that episode in the afternoon but keep it in the morning.
-    """
-    if days is None:
-        return None
-    return datetime.combine(today - timedelta(days=days - 1), time.min, tzinfo=UTC)
-
-
 class AnimeListService:
     def __init__(self, read_repository: CatalogueReadRepository):
         self.read_repository = read_repository
@@ -60,7 +41,6 @@ class AnimeListService:
         tag_match: TagMatch,
         studio_id: list[int] | None,
         release_status: ReleaseStatus | None,
-        released_days: int | None,
         min_score: float | None,
         min_ratings: int | None,
         sort: AnimeSort | None,
@@ -98,7 +78,6 @@ class AnimeListService:
             tag_match_all=tag_match is TagMatch.ALL,
             studio_ids=tuple(sorted(set(studio_id or ()))),
             release_status=release_status,
-            released_since=released_since(released_days, _utc_today()),
             min_score=min_score,
             min_ratings=min_ratings,
         )

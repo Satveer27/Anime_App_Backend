@@ -1,10 +1,9 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 
-from app.anime.service import released_since
 from app.catalogue.enums import (
     AnimeSeason,
     AnimeSort,
@@ -176,75 +175,6 @@ class TestReleaseStatus:
 
         served = [e for e in logs if e["event"] == "anime_list_served"]
         assert served[0]["release_status"] == "on_break"
-
-
-class TestReleasedSince:
-    """`released_days=N`: released an episode in the last N calendar days, today included."""
-
-    def at(self, year, month, day):
-        return datetime(year, month, day, tzinfo=UTC)
-
-    def test_no_days_means_no_filter(self):
-        assert released_since(None, date(2026, 11, 22)) is None
-
-    def test_a_week_called_on_a_sunday_is_monday_to_sunday(self):
-        sunday = date(2026, 11, 22)
-        assert sunday.strftime("%A") == "Sunday"
-
-        assert released_since(7, sunday) == self.at(2026, 11, 16)  # the Monday of that week
-
-    def test_the_episode_that_aired_the_sunday_before_is_the_previous_weeks(self):
-        since = released_since(7, date(2026, 11, 22))
-
-        assert self.at(2026, 11, 15) < since  # last Sunday, midnight UTC, is outside
-        assert self.at(2026, 11, 16) >= since  # Monday is inside
-
-    def test_one_day_is_today(self):
-        assert released_since(1, date(2026, 11, 18)) == self.at(2026, 11, 18)
-
-    def test_a_week_called_midweek(self):
-        assert released_since(7, date(2026, 11, 18)) == self.at(2026, 11, 12)
-
-    def test_it_counts_back_over_a_month_and_a_year_boundary(self):
-        assert released_since(7, date(2026, 3, 3)) == self.at(2026, 2, 25)
-        assert released_since(7, date(2026, 1, 3)) == self.at(2025, 12, 28)
-
-    def test_the_window_starts_at_midnight_utc(self):
-        since = released_since(30, date(2026, 11, 18))
-
-        assert (since.hour, since.minute, since.second, since.tzinfo) == (0, 0, 0, UTC)
-
-    async def test_the_service_turns_the_days_into_a_start_date(
-        self, anime_list_service, mock_read_repository, mocker
-    ):
-        mocker.patch("app.anime.service._utc_today", return_value=date(2026, 11, 22))
-
-        await anime_list_service.list_anime(**all_none_args(released_days=7))
-
-        assert sent_filters(mock_read_repository).released_since == self.at(2026, 11, 16)
-
-    async def test_without_released_days_the_filter_is_off(
-        self, anime_list_service, mock_read_repository
-    ):
-        await anime_list_service.list_anime(**all_none_args())
-
-        assert sent_filters(mock_read_repository).released_since is None
-
-    async def test_it_combines_with_the_other_filters(
-        self, anime_list_service, mock_read_repository, mocker
-    ):
-        mocker.patch("app.anime.service._utc_today", return_value=date(2026, 11, 22))
-
-        await anime_list_service.list_anime(
-            **all_none_args(
-                released_days=7, status=[AnimeStatus.AIRING], sort=AnimeSort.LATEST_EPISODE
-            )
-        )
-
-        filters, sort = mock_read_repository.search_anime.call_args.args[:2]
-        assert filters.released_since == self.at(2026, 11, 16)
-        assert filters.statuses == ("Currently Airing",)
-        assert sort == AnimeSort.LATEST_EPISODE
 
 
 class TestSortingAndPaging:

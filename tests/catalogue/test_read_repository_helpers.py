@@ -1,5 +1,4 @@
 import importlib.util
-from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.dialects import postgresql
@@ -87,31 +86,10 @@ class TestSearchSql:
         filters = AnimeFilters(
             q="titan", types=("TV",), statuses=("Currently Airing",), seasons=("fall",),
             year=2020, year_from=2010, year_to=2019, tag_ids=(1,), studio_ids=(2,),
-            release_status=ReleaseStatus.RELEASING, released_since=datetime(2026, 11, 16, tzinfo=UTC),
-            min_score=7.0, min_ratings=500,
+            release_status=ReleaseStatus.RELEASING, min_score=7.0, min_ratings=500,
         )  # fmt: skip
 
-        assert len(self.repository._anime_conditions(filters)) == 13
-
-    def test_released_since_is_an_episode_released_on_or_after_that_moment(self):
-        since = datetime(2026, 11, 16, tzinfo=UTC)
-
-        (condition,) = self.repository._anime_conditions(AnimeFilters(released_since=since))
-        compiled = condition.compile(dialect=postgresql.dialect())
-        text = str(compiled)
-
-        assert "EXISTS" in text
-        assert "episode.anime_id = anime.mal_id" in text
-        assert "episode.aired <= now()" in text  # a future-dated episode is not a release
-        assert "episode.aired >= " in text
-        assert since in compiled.params.values()
-
-    def test_released_since_is_a_bound_parameter(self):
-        since = datetime(2026, 11, 16, tzinfo=UTC)
-
-        (condition,) = self.repository._anime_conditions(AnimeFilters(released_since=since))
-
-        assert "2026" not in str(condition.compile(dialect=postgresql.dialect()))
+        assert len(self.repository._anime_conditions(filters)) == 12
 
     def test_several_values_become_an_in_list(self):
         conditions = self.repository._anime_conditions(

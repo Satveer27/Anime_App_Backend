@@ -110,35 +110,6 @@ class TestListAnimeEndpoint:
             ReleaseStatus.RELEASING
         )
 
-    def test_released_days_is_parsed_as_a_number(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        client.get(URL + "?released_days=7&sort=latest_episode")
-
-        kwargs = fake_anime_list_service.list_anime.call_args.kwargs
-        assert kwargs["released_days"] == 7
-        assert kwargs["sort"] == AnimeSort.LATEST_EPISODE
-
-    def test_released_days_is_off_by_default(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        client.get(URL)
-
-        assert fake_anime_list_service.list_anime.call_args.kwargs["released_days"] is None
-
-    @pytest.mark.parametrize("days", [1, 60])
-    def test_released_days_boundaries_are_accepted(self, client, fake_anime_list_service, days):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        assert client.get(URL + f"?released_days={days}").status_code == 200
-
-    @pytest.mark.parametrize("value", ["0", "-1", "61", "abc", "7.5"])
-    def test_released_days_outside_1_to_60_is_422(self, client, fake_anime_list_service, value):
-        response = client.get(URL + f"?released_days={value}")
-
-        assert response.status_code == 422
-        fake_anime_list_service.list_anime.assert_not_called()
-
     def test_the_latest_episode_sort_is_accepted(self, client, fake_anime_list_service):
         fake_anime_list_service.list_anime.return_value = make_response()
 

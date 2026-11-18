@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import Field
 
 from app.anime.deps import create_anime_list_service
-from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE, MAX_RELEASED_DAYS
+from app.anime.limits import MAX_FILTER_VALUES, MAX_PAGE_SIZE
 from app.anime.schemas import AnimeListResponse
 from app.anime.service import AnimeListService
 from app.catalogue.enums import (
@@ -38,13 +38,11 @@ PositiveId = Annotated[int, Field(ge=1, le=10_000_000)]
         "`release_status` looks at episode air dates: `releasing` = an episode aired in the last "
         f"{RELEASING_WITHIN_DAYS} days, `on_break` = airing with episodes but none in that window, "
         "`no_episode_data` = airing but we hold no episodes. "
-        "`released_days=N` keeps the anime that released an episode in the last N calendar days, "
-        "today included: `released_days=7` on a Sunday is Monday to Sunday. "
         "`sort`: members, score, favorites, newest, latest_episode, title, or relevance "
         "(needs `q`). Defaults to relevance with `q` and members without it; missing values sort "
         "last. For the top airing anime that are really releasing: "
-        "`status=airing&release_status=releasing&sort=members`. For this week's releases: "
-        "`released_days=7&sort=latest_episode`."
+        "`status=airing&release_status=releasing&sort=members`. For the best anime of a season: "
+        "`season=fall&year=2026&sort=score&min_ratings=500`."
     ),
 )
 async def list_anime(
@@ -61,13 +59,6 @@ async def list_anime(
     tag_match: TagMatch = Query(TagMatch.ALL, description="With several tags: all or any"),
     studio_id: list[PositiveId] | None = Query(None, max_length=MAX_FILTER_VALUES),
     release_status: ReleaseStatus | None = Query(None),
-    released_days: int | None = Query(
-        None,
-        ge=1,
-        le=MAX_RELEASED_DAYS,
-        description="Released an episode in the last N calendar days, today included (7 = this "
-        "week's releases when called on a Sunday)",
-    ),
     min_score: float | None = Query(None, ge=0, le=10),
     min_ratings: int | None = Query(None, ge=0, description="Minimum number of MAL ratings"),
     sort: AnimeSort | None = Query(None),
@@ -88,7 +79,6 @@ async def list_anime(
         tag_match=tag_match,
         studio_id=studio_id,
         release_status=release_status,
-        released_days=released_days,
         min_score=min_score,
         min_ratings=min_ratings,
         sort=sort,

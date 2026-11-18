@@ -25,7 +25,6 @@ class YearRangeSchema(BaseModel):
 class LimitsSchema(BaseModel):
     max_page_size: int
     max_filter_values: int = Field(..., description="How many times a filter can be repeated")
-    max_released_days: int = Field(..., description="The most `released_days` looks back")
 
 
 class FilterOptionsResponse(BaseModel):
