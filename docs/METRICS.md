@@ -655,3 +655,103 @@ All are far under the 5 s statement timeout, and the slowest (unfiltered hidden 
 **Finding: hidden gems return nothing for movies, and few for the other types.** The members rule ("bottom 50% of its type") is ranked among every anime with 50 or more ratings, and most non-TV anime are a long tail of obscure titles. The movie cohort has 3,049 anime with a median of 2,722 members; the 565 movies in the top 20% by score with at least 2,000 ratings all have 4,441 members or more, so none passes. TV works because its median is 39,742 members: of 5,490 TV anime, 1,097 are in the top 20% by score, 120 of those are also in the bottom half by members, and 113 keep 2,000 ratings. Raising `min_ratings` to 500 narrows the cohort to better-known anime and raises the median, which is why it returns 179 instead of 119. Options if this matters: rank the members percentile among anime that already pass the 2,000-rating floor, or replace the percentile with a fixed members cap.
 
 **Tests.** 12 real-Postgres tests (percentiles per type, each floor, filters that narrow without changing the ranking, ties, paging and counts, unaired and never-started anime), plus mock tests for the service and the controller.
+
+## 14. Redis cache and load test (issue #55), 18 Nov 2026
+
+**Setup.** The API ran on the developer's laptop (one uvicorn worker, `APP_ENV=rds`) against the real catalogue on RDS (db.t4g.micro, London, about 16 ms per statement from the laptop) with a local Redis (7, `noeviction`, as in production). Locust ran on the same laptop. Each combination ran with the cache off and on (`CACHE_ENABLED`), at 5, 20 and 50 users (spawn rate equal to users, 0.05 to 0.15 s between requests per user), for 60 s (full mix) or 45 s (per-anime statistics only). The cache was emptied before every run, so **each run starts cold** and the hit ratios below understate a warmed cache. The commands are `analysis/run_load_matrix.sh` and `analysis/locustfile.py`; the Redis hit ratio is the change in Redis's own `keyspace_hits` and `keyspace_misses` over the run (it also counts the lookups of anime that are deliberately never stored).
+
+- `FullMix` calls every public endpoint, 15 request types weighted roughly like a statistics page plus anime pages, including requests the cache does not cover (search, tag and year filters, a year range, episodes).
+- `StatsOnly` calls only `GET /anime/{id}/statistics`. 75% of its requests go to the top 1,000 anime by members, drawn with a Zipf weight `1 / (rank + 1)` (`ZIPF_S=1.0`), and 25% to a random anime from a sample of 1,000 from the rest. **That skew is an assumption**; the real traffic is unknown.
+- **Not representative of production:** laptop and RDS round trips dominate, the client and the server share one machine, and there is one worker. Compare the two modes with each other, not with production numbers.
+
+### What is cached
+
+Every key has a 3,600 s TTL, keys are built only from validated enums and ints (`make_key` refuses free text), and a Redis failure or a full Redis falls through to the database (32 tests in `tests/core/test_cache.py`). Cached: by-year, by-type, by-season, by-tag and by-studio without a year range and on their default page, hidden-gems and most-dropped (default first page, per type), `/filters`, the default `/studios` page, the anime list's first 10 pages and every page of three presets (see the update below), and **per-anime statistics for anime in the top `CACHE_STATS_TOP_N` (1,000) by popularity**. Not cached: search, any filtered or deeper list page, a year range, episodes, and per-anime statistics for less popular anime. A cached value is not invalidated when the catalogue refreshes; it expires by its TTL (up to an hour of stale data after a refresh, which ADR 0021 already accepts).
+
+### Results
+
+### FullMix
+
+| users | mode | requests | req/s | p50 (ms) | p95 (ms) | p99 (ms) | errors | Redis hit ratio | cache keys | Redis memory |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | uncached | 985 | 16.9 | 170 | 240 | 330 | 0 (0.0%) | - | - | - |
+| 5 | cached | 1,546 | 26.5 | 8 | 230 | 270 | 0 (0.0%) | 78% | 172 | 17.3 MiB |
+| 20 | uncached | 2,587 | 44.3 | 250 | 670 | 1200 | 0 (0.0%) | - | - | - |
+| 20 | cached | 5,200 | 89.2 | 18 | 400 | 690 | 0 (0.0%) | 84% | 364 | 35.7 MiB |
+| 50 | uncached | 3,157 | 54.1 | 640 | 1400 | 2200 | 0 (0.0%) | - | - | - |
+| 50 | cached | 9,117 | 153.8 | 76 | 680 | 1300 | 0 (0.0%) | 84% | 516 | 49.7 MiB |
+
+### StatsOnly
+
+| users | mode | requests | req/s | p50 (ms) | p95 (ms) | p99 (ms) | errors | Redis hit ratio | cache keys | Redis memory |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | uncached | 672 | 15.5 | 190 | 220 | 270 | 0 (0.0%) | - | - | - |
+| 5 | cached | 919 | 21.2 | 170 | 240 | 260 | 0 (0.0%) | 48% | 247 | 26.6 MiB |
+| 20 | uncached | 2,032 | 47.1 | 260 | 450 | 710 | 0 (0.0%) | - | - | - |
+| 20 | cached | 2,847 | 65.9 | 62 | 570 | 880 | 0 (0.0%) | 57% | 516 | 50.5 MiB |
+| 50 | uncached | 2,518 | 56.9 | 670 | 990 | 1300 | 0 (0.0%) | - | - | - |
+| 50 | cached | 4,853 | 109.6 | 140 | 840 | 1500 | 0 (0.0%) | 60% | 686 | 66.5 MiB |
+
+### Per endpoint, 20 users (FullMix)
+
+| endpoint | requests (uncached / cached) | p50 uncached | p50 cached | p95 uncached | p95 cached | errors (u / c) |
+|---|---|---|---|---|---|---|
+| /anime (search) | 143 / 278 | 250 | 200 | 990 | 460 | 0 / 0 |
+| /anime (tag + year) | 191 / 412 | 250 | 220 | 660 | 490 | 0 / 0 |
+| /anime (unfiltered first page) | 272 / 587 | 220 | 10 | 580 | 66 | 0 / 0 |
+| /anime/{id}/statistics | 687 / 1352 | 270 | 60 | 690 | 540 | 0 / 0 |
+| /anime/{id}/statistics/episodes | 99 / 175 | 200 | 180 | 600 | 400 | 0 / 0 |
+| /filters | 143 / 253 | 270 | 10 | 540 | 76 | 0 / 0 |
+| /statistics/by-season | 109 / 205 | 220 | 9 | 560 | 67 | 0 / 0 |
+| /statistics/by-studio | 95 / 175 | 300 | 10 | 660 | 85 | 0 / 0 |
+| /statistics/by-tag | 132 / 308 | 290 | 10 | 760 | 72 | 0 / 0 |
+| /statistics/by-type | 95 / 197 | 220 | 10 | 670 | 77 | 0 / 0 |
+| /statistics/by-year | 138 / 283 | 220 | 11 | 480 | 54 | 0 / 0 |
+| /statistics/by-year (year range) | 101 / 185 | 200 | 180 | 480 | 400 | 0 / 0 |
+| /statistics/hidden-gems | 130 / 310 | 320 | 10 | 740 | 82 | 0 / 0 |
+| /statistics/most-dropped | 154 / 288 | 260 | 10 | 660 | 76 | 0 / 0 |
+| /studios | 98 / 192 | 230 | 10 | 710 | 57 | 0 / 0 |
+
+At 50 users the picture is the same, scaled up: the cached endpoints go from 600 to 730 ms at p50 to 48 to 53 ms (`/filters` 690 to 48, by-tag 730 to 53, hidden-gems 680 to 50, most-dropped 610 to 51, the unfiltered list 600 to 51), per-anime statistics from 660 to 130 ms, and the endpoints that are never cached still improve (search 610 to 350, tag and year 650 to 380, episodes 570 to 310) because the database is less busy.
+
+### Findings
+
+1. **Tier 1 is worth caching.** At every level the aggregates, both new lists, `/filters`, `/studios` and the first list page drop from 140 to 190 ms at p50 (5 users) to **5 to 6 ms**, and at 50 users from 600 to 730 ms to about 50 ms. Over the whole mix, requests per second at 50 users go from **54 to 154 (2.8 times)** and p50 from 640 to 76 ms; p95 goes from 1,400 to 680 ms. **No errors in any of the 12 runs**, cached or not, even at 50 users on one worker.
+2. **Aggregate p95 and p99 improve less than p50** (50 users: p95 1,400 to 680 ms, p99 2,200 to 1,300 ms) because the requests that are never cached (search, filters, year range, episodes) and the cache misses of per-anime statistics still go to RDS (a hit on a big per-anime value also has to read and parse about 85 KiB).
+3. **Per-anime statistics (Tier 2) help under load, not at low concurrency.** Alone (`StatsOnly`), at 50 users requests per second go from **57 to 110** and p50 from **670 to 140 ms**; at 20 users p50 goes from 260 to 62 ms. At 5 users p50 barely moves (190 to 170 ms) because in 45 s from a cold cache only 48% of Redis lookups hit; the hit ratio is 57% at 20 users and 60% at 50. Its p95 is not better at 20 users (570 vs 450 ms) and only modestly at 50 (840 vs 990 ms): a miss still costs the full 5 statements, and a hit costs reading and parsing about 85 KiB.
+4. **The memory cost of Tier 2 is the real constraint, and my earlier estimate was 8 times too low.** Section 11 estimated 11 KiB per anime from a random sample, so about 11 MB for the top 1,000. Measured on the actual top 1,000 (loaded once into an empty cache, `analysis/cache_size_probe.py`): **response size avg 84.6 KiB, median 81.7, p95 132.4, max 237.1; Redis memory per key avg 92.6 KiB, p95 160.1, max 256.1; 999 of 1,000 stored (one is not in the top 1,000 by `popularity_mal`); total 90.4 MiB.** Popular anime have the longest review lists (20 full texts), so the anime asked for most are also the biggest. The 256 KiB per-value cap skipped none of them.
+5. **A sizing knob, not a yes or no.** With the assumed skew the hottest anime take most of the requests: the top 200 would be about 78% of the popular-anime requests (`H(200) / H(1000)` for `s = 1`) for about 18 MiB (200 x 92.6 KiB, an estimate), the top 1,000 all of them for about 90 MiB. `CACHE_STATS_TOP_N` sets it. Compressing the stored JSON (review text compresses well) would cut that several times at some CPU cost; not measured.
+
+### Decision
+
+- **Cache Tier 1 by default: yes.** Large, consistent gain, a few hundred keys and under 1 MiB for all the aggregate and list keys together (the cache memory of the full mix at 50 users, 49.7 MiB, is almost all per-anime statistics).
+- **Cache per-anime statistics: yes under load, with a bounded size.** It doubles throughput at 50 users and cuts p50 by 80%, so it is turned on for the top `CACHE_STATS_TOP_N` anime; **the default stays 1,000 (about 90 MiB)** until the memory of the Redis host is known. If that is too much, lower `CACHE_STATS_TOP_N` (200 is about 18 MiB) or compress the values. Redis is `noeviction`, so a full Redis rejects the write and the request is still answered from the database.
+- **Not cached, on purpose:** search, filtered and deep list pages, year ranges, episodes (up to 1.3 MB), and per-anime statistics outside the top 1,000.
+
+### Limits of this test
+
+- Cold cache at the start of every run and short runs (45 to 60 s): steady-state hit ratios are higher, and per-anime statistics are the slowest to warm because they have the most keys.
+- The traffic mix and the Zipf skew are assumptions; a flatter real distribution lowers the per-anime hit ratio and raises the memory needed for the same hit ratio.
+- Laptop, one worker, client and server on the same machine, RDS reached over the internet; the absolute milliseconds will differ in production, inside the VPC the database round trips are about 1 ms and the cache gain would be smaller in milliseconds but still avoid the database work.
+- The cache is not invalidated on a catalogue refresh, only by TTL.
+- Redis memory is `used_memory` (includes about 1.1 MiB of baseline).
+
+### Update: list pages and presets (18 Nov 2026)
+
+The first version cached only the unfiltered first page of the anime list, so "currently airing" (`status=airing`) and a second page always went to the database. It now caches:
+
+- **The plain list (no search, no filter), pages 1 to 10**, in any sort and order. Page sizes of 20, 50 and 100 only, and the offset must be a multiple of the page size, so the keys are the pages a frontend walks through.
+- **Three presets, every page up to an offset of 1,000:** `status=airing`, `status=upcoming`, and the **current season and year** (`season=fall&year=2026` today; the season comes from today's date with MAL's calendar, so next quarter it is a new key and the old one expires). On RDS they hold 271, 233 and 115 anime, so every page is covered; the cap of 1,000 keeps a client that asks for offsets past the end from creating a key for each.
+- **Not cached:** a search, any other filter (even together with a preset), more than one status or season, `finished`, any other season or year, pages 11 and later of the plain list, other page sizes. The key builder now accepts lists of enums, sorted, so `status=upcoming&status=airing` and the reverse are not two keys (it still refuses free text and floats).
+
+**Checked on RDS** (`analysis/cache_list_probe.py`: each page requested twice, first from the database, then from the cache, the API running locally, cold cache): every cached page returned exactly the same JSON as the database read, and requests that must not be cached created no keys.
+
+| list | page size | pages | first load, median | from cache, median | anime |
+|---|---|---|---|---|---|
+| airing, by members | 20 | 15 (the last is empty) | 158.6 ms | 5.0 ms | 271 |
+| airing, by members | 50 | 7 | 202.3 ms | 5.4 ms | 271 |
+| upcoming, by members | 20 | 13 | 155.0 ms | 4.8 ms | 233 |
+| fall 2026, by score | 20 | 7 | 141.9 ms | 5.3 ms | 115 |
+| plain list, by members | 20 | 10 | 144.8 ms | 5.1 ms | 23,086 |
+
+These 52 keys use **0.53 MiB** (avg 10.5 KiB, max 24.3 KiB). If a frontend used every sort, order and page size, the worst case is roughly 30 MiB (an estimate: about 0.4 MiB per preset and sort and order for the real pages across the three page sizes, 18 sort and order combinations, three presets, plus the plain list's 10 pages and the tiny empty pages up to the cap); one sort and one page size is the realistic case. The first-load times include the laptop to RDS round trips, as in section 11.

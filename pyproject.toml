@@ -34,6 +34,7 @@ dev = [
     "ipykernel>=7.4.0",
     "pandas>=3.0.6",
     "apache-airflow>=3.2.2",
+    "locust>=2.47.0",
 ]
 
 [tool.ruff]
