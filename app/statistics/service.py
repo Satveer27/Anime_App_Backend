@@ -4,6 +4,8 @@ import structlog
 
 from app.catalogue.models import Anime, AnimeStatisticsMal
 from app.catalogue.repository import CatalogueRepository, CohortStanding
+from app.config import settings
+from app.core.cache import ResponseCache, cached
 from app.statistics.calculations import (
     HIGH_SCORES,
     LOW_SCORES,
@@ -52,10 +54,24 @@ GEM_MIN_SCORE_PERCENTILE = 0.80
 GEM_MAX_POPULARITY_PERCENTILE = 0.30
 
 
-class StatisticsService:
-    def __init__(self, catalogue_repository: CatalogueRepository):
-        self.catalogue_repository = catalogue_repository
+def _is_popular(response: AnimeStatisticsResponse) -> bool:
+    """Store only the most popular anime (by MAL popularity rank), so the key space is bounded.
 
+    The anime that are asked for most are also the ones with the biggest review lists, so this
+    is a bounded, hot set and not the whole catalogue (see METRICS.md, issue #55).
+    """
+    rank = response.core.popularity_mal
+    return rank is not None and rank <= settings.cache_stats_top_n
+
+
+class StatisticsService:
+    def __init__(
+        self, catalogue_repository: CatalogueRepository, cache: ResponseCache | None = None
+    ):
+        self.catalogue_repository = catalogue_repository
+        self.cache = cache
+
+    @cached("anime_statistics", AnimeStatisticsResponse, store_if=_is_popular)
     async def get_anime_statistics(self, mal_id: int) -> AnimeStatisticsResponse:
         """Everything the per-anime statistics page shows, or AnimeNotFoundError.
 

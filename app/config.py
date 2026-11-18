@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     tenrai_rate_limiter_requests_per_minute: float = 100
     mal_data_base_url: str = "https://api.tenrai.org/v1"
     refresh_grace_seconds: int = 10
+    # Redis response cache for the public statistics and anime endpoints (#55). Redis runs with
+    # `noeviction`, so every value has a TTL and a size cap, and a cache failure falls through.
+    cache_enabled: bool = True
+    cache_ttl_seconds: int = 3600
+    cache_max_value_bytes: int = 262_144
+    # Per-anime statistics are cached only for anime at or above this MAL popularity rank.
+    cache_stats_top_n: int = 1000
     # Raw Tenrai responses live in S3 (ADR 0016). Only the ingestion jobs need it, so it is
     # optional here and the jobs refuse to start without a bucket. Credentials come from the
     # standard AWS chain (env vars or an IAM role), not from settings.

@@ -6,6 +6,7 @@ from app.catalogue.read_repository import (
     CatalogueReadRepository,
     statement_timeout_to_503,
 )
+from app.core.cache import ResponseCache, cached
 from app.exceptions import BadRequestError
 from app.statistics.list_schemas import (
     HiddenGemRowSchema,
@@ -26,6 +27,7 @@ HIDDEN_GEM_COHORT_MIN_RATINGS = 50
 HIDDEN_GEM_MIN_SCORED_BY = 2_000
 # Most dropped: tiny anime have noisy drop rates, so they need at least this many members.
 DROPPED_MIN_MEMBERS = 10_000
+DEFAULT_PAGE_SIZE = 20  # the controller's default, the only page size cached
 PERCENTILE_DIGITS = 3
 RATE_DIGITS = 4
 
@@ -35,9 +37,30 @@ def _api_type(stored: str) -> str:
     return API_TYPE.get(stored, stored.lower().replace(" ", "_"))
 
 
+def _first_page(args: dict) -> bool:
+    """Only the unfiltered first page: a year range or a deep offset is an unbounded key space."""
+    return (
+        args["year_from"] is None
+        and args["year_to"] is None
+        and args["limit"] == DEFAULT_PAGE_SIZE
+        and args["offset"] == 0
+    )
+
+
+def _default_gems(args: dict) -> bool:
+    return _first_page(args) and args["min_ratings"] == HIDDEN_GEM_COHORT_MIN_RATINGS
+
+
+def _default_dropped(args: dict) -> bool:
+    return _first_page(args) and args["min_members"] == DROPPED_MIN_MEMBERS
+
+
 class ListService:
-    def __init__(self, read_repository: CatalogueReadRepository):
+    def __init__(
+        self, read_repository: CatalogueReadRepository, cache: ResponseCache | None = None
+    ):
         self.read_repository = read_repository
+        self.cache = cache
 
     @staticmethod
     def _filters(type: AnimeType | None, year_from: int | None, year_to: int | None):
@@ -47,6 +70,7 @@ class ListService:
             type=STORED_TYPE[type] if type else None, year_from=year_from, year_to=year_to
         )
 
+    @cached("list_hidden_gems", HiddenGemsResponse, cacheable=_default_gems)
     async def hidden_gems(
         self,
         type: AnimeType | None,
@@ -89,6 +113,7 @@ class ListService:
             ],
         )
 
+    @cached("list_most_dropped", MostDroppedResponse, cacheable=_default_dropped)
     async def most_dropped(
         self,
         type: AnimeType | None,
