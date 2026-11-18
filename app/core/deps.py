@@ -5,6 +5,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.catalogue.read_repository import CatalogueReadRepository
 from app.catalogue.repository import CatalogueRepository
 from app.core.database.database import get_db
 from app.exceptions import AuthenticationError, ForbiddenError
@@ -31,6 +32,12 @@ def create_refresh_token_repository(
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> RefreshTokenRepository:
     return RefreshTokenRepository(db)
+
+
+def create_catalogue_read_repository(
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> CatalogueReadRepository:
+    return CatalogueReadRepository(db)
 
 
 def create_catalogue_repository(

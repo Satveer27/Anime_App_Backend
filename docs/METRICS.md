@@ -455,3 +455,174 @@ A one-season show is unchanged (the 3.5 to 3.9 ms matches the 2.1 to 3.8 ms meas
 | One Piece | 7,080 | 70.25 ms | 152.12 ms | **105.12 ms** |
 
 The two extra metrics cost about 5 ms for a one-season show and 35 ms for One Piece. Percentiles are unchanged for these anime; the difference is only in ties, where tied anime now share one rank and one percentile (the percentile is the share of the cohort not ranked above the anime, so ties count as beaten). The per-anime response is the next thing to cache or precompute (#55).
+
+## 10. The anime list and the platform-wide aggregates (issue #53), 18 Nov 2026
+
+**What was measured.** `analysis/bench_aggregates.py` runs the real repository queries (`app/catalogue/read_repository.py`) on RDS (db.t4g.micro, London, from the developer's laptop, round trip about 16 ms): one warm-up, 15 timed runs for the round trip, then the median of 5 `EXPLAIN ANALYZE` runs for each statement. Data: 23,086 anime, 68,081 `anime_tag` rows, 16,922 `anime_studio` rows. Every list request runs two statements (the count and the page), shown as `count + page`. One batch of runs, not repeated.
+
+**Before any new index (only `ix_anime_type_year` and `ix_review_anime_id` from section 7 existed):**
+
+| Request | Round trip | Database (ms) | Plan |
+|---|---|---|---|
+| list, all anime, by members | 71 ms | 5.7 + 18.5 | seq scan `anime` |
+| list, by members, page 500 (offset 10,000) | 90 ms | 5.6 + 39.6 | seq scan |
+| list, all anime, by title | 87 ms | 5.7 + 36.3 | seq scan |
+| list, airing, by members | 63 ms | 6.5 + 6.7 | seq scan (271 rows match) |
+| list, TV 2019, by score | 50 ms | 0.4 + 0.5 | bitmap scan on `ix_anime_type_year` |
+| list, tag 1 (Action), by score | 3 | 173 ms | 9.0 KiB | 15.3 + 16.9 |
+| list, tag 1 + year 2019, by score | 54 ms | 1.7 + 1.7 | bitmap scan on `ix_anime_type_year` |
+| list, one studio, newest | 54 ms | 1.6 + 2.1 | seq scan `anime_studio` |
+| **list, search "titan"** | **263 ms** | **105.8 + 106.1** | seq scan, six ILIKEs per row |
+| **list, search "one piece"** | **272 ms** | **110.1 + 110.2** | seq scan |
+| list, search "a" (5,058 matches) | 250 ms | 90.5 + 108.2 | seq scan |
+| by-year | 53 ms | 22.9 | seq scan |
+| by-year, TV only | 45 ms | 12.7 | bitmap scan on `ix_anime_type_year` |
+| by-type | 2 | 141 ms | 0.8 KiB | 24.6 |
+| by-season | 2 | 147 ms | 0.5 KiB | 26.5 |
+| by-tag | 2 | 208 ms | 10.2 KiB | **110.8** |
+| by-tag, TV 2015 to 2025 | 54 ms | 27.4 | bitmap scan on `ix_anime_type_year` |
+| by-studio | 101 ms | 27.5 + 39.8 | seq scans on `anime_studio`, `anime`, `studio` |
+
+**Search was the problem**: a search took 105 ms of database time per statement, 210 ms with the count, with `ILIKE` over three title columns and two patterns. Rewriting it as one `ILIKE` on the combined title text (the start of any word, in any of the three titles) took 49.8 ms for the same 25 matches (104.7 ms before), and `lower()` with `LIKE` 43.2 ms, `position()` 38.3 ms: all still scans, because ILIKE under `en_US.UTF-8` is slow on this CPU.
+
+**Index candidates, measured on rolled-back temporary copies** (the method of section 7; the copies sit in small session-local buffers, so their no-index baselines are inflated against the real tables and only the before/after on the copy is meaningful). `CREATE EXTENSION pg_trgm` ran inside a transaction that was rolled back, so nothing was left installed on RDS; the app's database user was allowed to create it.
+
+| Candidate | Query | Before (copy) | After (copy) | Index size | Added? |
+|---|---|---|---|---|---|
+| GIN trigram on the combined title text | search "titan" | 51.6 ms | **0.26 ms** | 8,896 KiB | **yes** |
+| the same | search "one piece" | n/a | **0.47 ms** | | |
+| the same | search "ti" (2 letters) | n/a | 1.77 ms | | |
+| the same | search "a" (1 letter) | n/a | 19.6 ms | | |
+| `anime (members_mal DESC NULLS LAST, mal_id)` | list by members, page query | 20.5 ms | **0.07 ms** | 528 KiB | **yes** |
+| `anime (mal_score DESC NULLS LAST, mal_id)` | list by score, page query | 20.8 ms | **0.06 ms** | 728 KiB | **yes** |
+| `anime (lower(title), mal_id)` | list by title, page query | 38.5 ms | 0.10 ms | 1,224 KiB | no (expression index; sorting by title stays at about 36 ms) |
+| `anime_tag (tag_id)` | list, tag 1 by score | 15.3 + 17.5 ms | 15.3 + 17.5 ms (not used) | 488 KiB | **no**: Action is 20% of the table, so the planner scans |
+| `anime_studio (studio_id)` | list, studio 1 newest | 11.9 + 12.1 ms | 10.8 + 11.0 ms | 160 KiB | **no**: about 1 ms |
+
+No index was added for favorites or newest, which were not measured. Write cost of the three added indexes was not measured: `anime` is written only by the weekly and manual refreshes (hundreds of rows).
+
+**After the migrations, checked on a throwaway local Postgres 16** (Docker, a copy of the 23,086 real titles, not RDS, so the milliseconds are not comparable with the table above; the point is that the application's own queries use the indexes, including with bound parameters):
+
+| Request | Database (ms) | Plan |
+|---|---|---|
+| search "titan" | 0.84 + 0.81 | bitmap scan on `ix_anime_search_trgm` |
+| search "one piece" | 0.92 + 1.15 | `ix_anime_search_trgm` |
+| search "a" | 9.9 + 20.7 | `ix_anime_search_trgm`, 5,058 matches |
+| search "zzzz" (no match) | 0.31 + 0.34 | `ix_anime_search_trgm` |
+| list by members | 2.8 + 0.08 | index scan `ix_anime_members_mal` for the page |
+| list by members, page 500 | 2.8 + 5.3 | |
+| list by title | 2.6 + 20.8 | seq scan (no index, as decided) |
+
+`alembic upgrade head`, `alembic downgrade b3d8f50e6c17` and `upgrade head` again, and `alembic check` all passed on that database. A first attempt that left the trigram index out of the model made `alembic check` fail with "Detected removed index", so the index is declared on the model (Alembic then reports it cannot compare an expression index and assumes it equal).
+
+**Still to do:** re-measure on RDS after the migrations are applied (the migrate job runs when this merges), and fill in the real-table numbers for the list and search rows above.
+
+### The release-status filter, built and removed (same day)
+
+A `release_status` filter (`releasing` = an episode in the last 10 days, `on_break` = airing with episodes but none in that window, `no_episode_data`), with `sort=latest_episode`, a `last_episode_aired` field and an index `ix_episode_aired`, was built, measured, and then **removed**. The reason is that it was derived by us from the `episode` table, not a field MAL provides, and MAL's episode list lags the real broadcasts: **Black Clover 2nd Season** (`mal_id` 61967) holds episodes 1 to 5 (the last dated 31 Oct), although our pipeline fetched its episodes on 15 Nov, after episodes 6 and 7 (7 and 14 Nov) had aired, so MAL did not have them yet. The pipeline itself was fresh: all 111 airing anime that have episode rows were fetched within the last 7 days (86 within 1 to 3 days, 25 within 3 to 7). Only 111 of the 271 airing anime have episode rows at all, and 16,383 of 112,257 episodes have no air date. So a derived "on a break" (87 anime on 18 Nov) includes shows that are simply not registered yet (Black Clover was in that list), and the earlier statement that 87 airing anime were on a break was an overstatement. The only airing signal now is MAL's own `status` (airing, finished, upcoming), which keeps a show on a break as airing. The migration `f6c1e4a9b3d0` was deleted before it was ever applied (RDS stayed at `b3d8f50e6c17`).
+
+What it measured, for the record: the release queries took 28.9 + 27.3 ms (`count + page`) on RDS because they scanned all 112,257 episodes, 0.15 + 0.19 ms with an `episode (aired)` index on a rolled-back temporary copy (1,208 KiB), and sorting all anime by their latest episode took 121.6 ms.
+
+Several-value filters, same method as above (RDS, median of 5 `EXPLAIN ANALYZE` runs, `count + page`):
+
+| Request | Round trip | Database (ms) | Plan |
+|---|---|---|---|
+| list, tags 1 AND 4 (1,140 match) | 88 ms | 13.0 + 14.6 | seq scan `anime_tag` |
+| list, tags 1 OR 4 (11,121 match) | 99 ms | 19.4 + 36.4 | seq scan `anime_tag` |
+
+### A `released_days` filter, built and removed, and the filter options (same day)
+
+A `released_days=N` filter (released an episode in the last N calendar days, for a Sunday "this week's releases" view) was built and then removed together with the release-status filter, for the reason above. On RDS on Wed 18 Nov 2026 it returned 20 anime for 7 days and 35 for 14.
+
+The two endpoints that fill the filter controls, `GET /filters` (every tag with its anime count, the year range and the fixed choices) and `GET /studios` (search and paginate), measured with the same method before any new index:
+
+| Request | Round trip | Database (ms) | Plan |
+|---|---|---|---|
+| filters: the 78 tags with counts | 53 ms | 31.3 | seq scans on `anime_tag`, `tag` |
+| filters: the year range | 41 ms | 9.1 | seq scan `anime` |
+| studios, by anime count (1,165 match) | 62 ms | 8.7 + 9.1 | seq scans `anime_studio`, `studio` |
+| studios, search "toei" | 165 ms | 4.8 + 4.8 | same |
+| studios, search "a" | 58 ms | 5.8 + 6.1 | same |
+| studios, by name, page 20 | 63 ms | 8.7 + 10.6 | same |
+
+Both are cheap, so no Redis cache was added: `/filters` is the same for everyone and changes only when the catalogue refreshes, so it is sent with `Cache-Control: public, max-age=3600` and the browser or nginx can keep it for an hour. A server-side cache is a #55 decision.
+
+**What this says about caching (#55).** After the indexes the list and search are cheap, but the aggregates are not and need no per-user input: by-tag takes 111 ms in the database and by-studio about 67 ms, by-year, by-type and by-season 23 to 27 ms. They change only when the catalogue refreshes, so they are the best candidates for a per-parameter cache.
+
+## 11. Cache candidates and known inefficiencies (issues #51 to #53), 18 Nov 2026
+
+`analysis/bench_endpoints.py` calls every public endpoint through the real app against RDS (db.t4g.micro, London, from the developer's laptop, round trip about 16 ms per statement): one warm-up, then the median of 5 calls, with the number of SQL statements each call runs and the size of the response. The "Database (ms)" column repeats the `EXPLAIN ANALYZE` execution times from sections 7, 9 and 10, which were measured **before** the new indexes were applied on RDS (they are applied when the migrations run on merge), so "after" figures are still to be taken on RDS. Everything from the laptop is dominated by round trips: a call with 4 statements costs about 4 x 16 ms before any database work.
+
+| Request | Statements | From the laptop | Size | Database (ms), before the new indexes |
+|---|---|---|---|---|
+| list, default (20 anime) | 3 | 157 ms | 8.5 KiB | count 5.7 + page 18.5 |
+| list, 100 anime | 3 | 169 ms | 43.4 KiB | not measured separately |
+| list, airing, by members | 3 | 153 ms | 9.8 KiB | 6.4 + 7.3 |
+| list, fall 2025, by score | 3 | 140 ms | 9.1 KiB | not measured separately |
+| list, tag 1 (Action), by score | 3 | 173 ms | 9.0 KiB | 15.3 + 16.9 |
+| list, search "titan" | 3 | 245 ms | 9.5 KiB | 105.8 + 106.1 (51.8 + 52.0 with the combined-text query, no index; 0.8 + 0.8 with the trigram index, on local Postgres) |
+| list, sort by title | 3 | 177 ms | 8.2 KiB | 5.7 + 36.3 |
+| `/filters` | 4 | 175 ms | 5.5 KiB | tags 31.3 + year range 9.1 |
+| `/studios` (20) | 3 | 146 ms | 1.1 KiB | 8.7 + 9.1 |
+| by-year | 2 | 141 ms | 11.7 KiB | 22.9 |
+| by-type | 2 | 141 ms | 0.8 KiB | 24.6 |
+| by-season | 2 | 147 ms | 0.5 KiB | 26.5 |
+| by-tag | 2 | 208 ms | 10.2 KiB | **110.8** |
+| by-studio (20) | 3 | 190 ms | 2.8 KiB | 27.5 + 39.8 |
+| anime statistics, Steins;Gate | 5 | 186 ms | **123.8 KiB** | about 35 in all (section 7), the cohort query 3.5 to 8.6 |
+| anime statistics, One Piece | 5 | 275 ms | 3.6 KiB (no reviews stored) | cohort query **105.1** |
+| anime episodes, Steins;Gate | 2 | 120 ms | 30.9 KiB | a primary-key read |
+| anime episodes, One Piece | 2 | 188 ms | **1,343 KiB** | a primary-key read |
+
+Sizes over a random sample: the per-anime statistics response is **avg 11.0 KiB, median 3.0, p95 52.5, max 88.5** (60 anime), the episodes response **avg 12.9, median 7.7, p95 29.5, max 110.4** (40 anime with episodes). The statistics size is almost all reviews (up to 20 full texts).
+
+**Inefficiencies known and not fixed.** The queries are not as fast as they could be. What is left, and what it would take:
+1. **Sorting the whole catalogue by title takes 36 ms** (a scan and sort). Only an expression index would fix it, which was left out to avoid another expression index in the models.
+2. **by-tag takes 110.8 ms** and by-year, by-type and by-season 23 to 27 ms: they aggregate 23,086 anime (68,081 tag links for by-tag) on every call. An index does not help a full aggregation.
+3. **by-studio and `/studios` run the grouped query twice** (once to count, once for the page): 27.5 + 39.8 ms and 8.7 + 9.1 ms. Counting with a window function in the same query would roughly halve it (an estimate, not measured).
+4. **Statements per request**: every list runs 3 (`SET LOCAL statement_timeout`, count, page), and `/filters` runs 4 because each of its two reads sets its own timeout. From a laptop each costs 16 ms; inside the VPC about 1 ms. The timeout could be set once per request.
+5. **Deep offset pages**: offset 10,000 on the default list took 5.6 + 39.6 ms, against 5.7 + 18.5 ms for the first page.
+6. **The per-anime statistics response has no cap on reviews** (123.8 KiB for Steins;Gate), and its cohort query takes 105 ms for a long runner (One Piece's cohort is 7,080 anime).
+7. **Big tags are scanned**: a list filtered by Action (20% of the table) reads all of `anime_tag` (15.3 + 16.9 ms); an `anime_tag (tag_id)` index did not help on a temporary copy, so none was added.
+8. **A one-letter search** takes about 30 ms (5,058 matches) even with the trigram index.
+9. **The new indexes are not yet measured on the real RDS tables**, and the write cost of none of them was measured (the tables are written only by the weekly and manual refreshes).
+
+**What to cache in Redis (#55).** Nothing here is per user and all of it changes only when the catalogue refreshes (weekly for airing anime, monthly for the rest), so a TTL of an hour is safe. Redis runs with `noeviction`, so every cached key family needs a bounded key space and a size cap.
+
+| Candidate | Why | Key space | Verdict |
+|---|---|---|---|
+| `/filters`, the default `/studios` page, by-type, by-season, by-year (no filters) | the same for everyone, 23 to 31 ms of aggregation or scanning | one key each | **cache** (`/filters` is already sent with `Cache-Control: public, max-age=3600`) |
+| by-tag and by-studio, no year range | the most expensive (110.8 ms; 67 ms) | a few keys (type x sort x order) | **cache** |
+| by-tag, by-studio, by-year with `year_from`/`year_to` | the same cost | thousands of combinations | **do not cache**, or only cache the ranges the frontend offers |
+| list, default and the frontend's own presets (top by members, top by score, airing, a season) | the first page is 20 ms to 56 ms before the indexes | a handful of keys | **cache**, TTL at most an hour |
+| list with any other filter, sort or offset | already cheap with the indexes, and the key space is unbounded | huge | **do not cache** |
+| search | about 1 ms with the trigram index, and every keystroke is a new key | unbounded | **do not cache** |
+| per-anime statistics | 35 ms, up to 105 ms for a long runner | one key per anime | **cache the popular ones only**: about 11 KiB on average, so 1,000 anime is about 11 MB, and all 23,086 about 250 MB (estimates from the sample), too much for a `noeviction` Redis |
+| per-anime episodes | a primary-key read | one key per anime | **do not cache**: One Piece alone is 1.3 MB; if ever cached, compress and skip entries over a size limit |
+
+Re-run `analysis/bench_endpoints.py` and `analysis/bench_aggregates.py` after the migrations are applied on RDS, and again after Redis is in, to compare.
+
+### The aggregates' minimum ratings, lowered from 500 to 50 (18 Nov 2026)
+
+An anime counts in a group's score numbers only if it has a score and at least `MIN_RATINGS` MAL ratings. The aggregates used 500, the same bar as the per-anime `low_sample` flag, and left out most small studios and tags, so it was lowered to **50** and decoupled from `low_sample` (which stays at 500, as does the hidden-gem exclusion). Effect on the real catalogue (by-type, summed): anime with a trusted score **11,224 of 23,086 (49%) at 500, 15,379 (67%) at 50**; the TV average moved from 7.00 to 6.88, because more obscure, lower-rated anime now count (movies 6.78 to 6.38, ONA 6.62 to 6.28). Studios that qualify with at least 30 scored anime went from 84 to 99. The timings in sections 10 and 11 were taken with 500; the threshold only changes a `FILTER` on the same scan, so they were not re-measured.
+
+### `min_ratings` is now a query parameter on the five aggregates (18 Nov 2026)
+
+`GET /api/v1/statistics/by-year`, `by-type`, `by-season`, `by-tag` and `by-studio` take `min_ratings` (0 to 100,000, default 50), and each response reports the value used. `by-studio` also keeps its own `min_anime` (the minimum scored anime per studio, default 10). On RDS, `by-type` for TV gives 5,490 scored anime of 8,580 (mean 6.876) at both `min_ratings=0` and 50, and 4,776 (mean 6.997) at 500: MAL gives a score only to anime with at least 100 ratings (the lowest `scored_by_mal` among scored anime is 101, and none has fewer than 100), so every value up to 100 returns exactly the same result and the default of 50 means every anime MAL scores; only a value above 100 excludes anime. `by-type` and `by-season` already took `year_from` and `year_to`, so a single year or any range works (for example TV by season in 2025: winter 6.85, spring 6.84, summer 7.16, fall 6.94).
+
+## 12. Consistency audit of the statistics (issues #51 to #53), 18 Nov 2026
+
+`analysis/audit_statistics.py` cross-checks the endpoints against each other and against direct SQL on the real catalogue (RDS, read-only). **All 14 checks pass:**
+- the anime totals of by-type (23,086), by-year (22,389 plus 697 with no year) and by-season (18,475 plus 4,611 with no season) all add up to the list's total;
+- the scored totals match SQL exactly (by-type 15,379, by-year 15,363) and the weighted mean of by-type equals SQL's average (6.5417 against 6.5416);
+- over 296 group rows across the five endpoints, `scored_count` never exceeds `anime_count`, means and medians stay within 1 to 10, and a mean is null exactly when `scored_count` is 0;
+- by-studio is sorted by mean and respects its minimum; `scored_count` shrinks as `min_ratings` rises (15,379, 15,379, 11,224 at 0, 50 and 500);
+- over 80 random anime, the per-anime statistics hold their invariants (list-status shares add to 1, vote percentages to 100, every percentile within 0 and 1 with its rank within the cohort, no hidden gem on a low-sample anime); over 60 random anime with episodes, the smoothed scores stay within the score range, best is not below worst, and a turning point exists exactly for `gets_good`;
+- the OpenAPI document builds (32 paths).
+
+**Findings, not failures.**
+- **MAL's score and the mean of its vote histogram differ.** Both are in the per-anime response (`core.mal_score` and `score_distribution.mean`, which the schema labels as computed from the histogram). Over all scored anime with a histogram the gap is small for popular anime and larger for less rated ones: median 0.024 and mean 0.042 with 10,000 or more ratings (4,920 anime), median 0.034 and mean 0.056 with 1,000 to 10,000 (4,640), median 0.159 and mean 0.234 with 100 to 999 (5,819); the histogram mean runs lower than MAL's score by 0.13 on average in that last group, and the largest single gap is 2.32. MAL's score is not a plain average of the votes, so the two should not be shown as the same number.
+- **The aggregates' default minimum of 50 ratings equals "every scored anime"**, because MAL does not score an anime below 100 ratings (see the `min_ratings` note above).
+- The votes in the histogram add up to `scored_by_mal` (median ratio 1.000, range 0.946 to 1.001 over 80 anime).
+
+**Not covered by the audit:** the SQL of the new indexes has not been measured on the real RDS tables (the migrations run on merge), there are no real-Postgres tests, and load behaviour is untested (#55).
