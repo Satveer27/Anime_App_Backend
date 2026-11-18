@@ -2,14 +2,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import structlog
-from sqlalchemy import Text, and_, case, func, literal_column, or_, select, text
+from sqlalchemy import Float, Text, and_, case, cast, func, literal_column, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalogue.enums import AnimeSort, GroupSort, Order, StudioSort
 from app.catalogue.models import (
     SEARCH_TEXT_SQL,
+    STATUS_NOT_YET_AIRED,
     Anime,
+    AnimeStatisticsMal,
     AnimeStudio,
     AnimeTag,
     Studio,
@@ -431,6 +433,148 @@ class CatalogueReadRepository:
         return (
             [
                 {"studio_id": row.studio_id, "name": row.name, **self._stat_values(row)}
+                for row in rows.all()
+            ],
+            total,
+        )
+
+    # --- lists: hidden gems and most dropped ----------------------------------------------
+
+    async def hidden_gems(
+        self,
+        filters: AggregateFilters,
+        cohort_min_ratings: int,
+        score_percentile: float,
+        members_percentile: float,
+        min_scored_by: int,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict], int]:
+        """Anime scored in the top of their type but with few members, and how many there are.
+
+        Percentiles are ranked within each type across the whole catalogue (anime with a score,
+        members and at least `cohort_min_ratings` ratings), then the filters narrow the result.
+        So `year_from` does not change what "top 20% of its type" means.
+        """
+        await self._limit_time()
+        ranked = (
+            select(
+                Anime.mal_id,
+                Anime.title,
+                Anime.type,
+                Anime.year,
+                Anime.mal_score,
+                Anime.scored_by_mal,
+                Anime.members_mal,
+                func.percent_rank()
+                .over(partition_by=Anime.type, order_by=Anime.mal_score)
+                .label("score_percentile"),
+                func.percent_rank()
+                .over(partition_by=Anime.type, order_by=Anime.members_mal)
+                .label("members_percentile"),
+            )
+            .where(
+                Anime.type.is_not(None),
+                Anime.mal_score.is_not(None),
+                Anime.members_mal.is_not(None),
+                Anime.scored_by_mal >= cohort_min_ratings,
+            )
+            .cte("ranked")
+        )
+        conditions = [
+            ranked.c.score_percentile >= score_percentile,
+            ranked.c.members_percentile <= members_percentile,
+            ranked.c.scored_by_mal >= min_scored_by,
+        ]
+        if filters.type is not None:
+            conditions.append(ranked.c.type == filters.type)
+        if filters.year_from is not None:
+            conditions.append(ranked.c.year >= filters.year_from)
+        if filters.year_to is not None:
+            conditions.append(ranked.c.year <= filters.year_to)
+
+        total = (
+            await self.db.execute(select(func.count()).select_from(ranked).where(*conditions))
+        ).scalar_one()
+        rows = await self.db.execute(
+            select(ranked)
+            .where(*conditions)
+            .order_by(ranked.c.mal_score.desc(), ranked.c.members_mal, ranked.c.mal_id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return (
+            [
+                {
+                    "mal_id": row.mal_id,
+                    "title": row.title,
+                    "type": row.type,
+                    "year": row.year,
+                    "mal_score": _as_float(row.mal_score),
+                    "scored_by_mal": row.scored_by_mal,
+                    "members_mal": row.members_mal,
+                    "score_percentile": float(row.score_percentile),
+                    "members_percentile": float(row.members_percentile),
+                }
+                for row in rows.all()
+            ],
+            total,
+        )
+
+    async def most_dropped(
+        self, filters: AggregateFilters, min_members: int, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        """Anime with the highest share of starters who dropped, and how many qualify.
+
+        Same definition as the per-anime `drop_rate`: dropped / (total - plan to watch). Anime
+        that have not aired, and anime nobody started, are left out.
+        """
+        await self._limit_time()
+        started = AnimeStatisticsMal.total - AnimeStatisticsMal.plan_to_watch
+        drop_rate = (cast(AnimeStatisticsMal.dropped, Float) / started).label("drop_rate")
+        conditions = [
+            Anime.members_mal >= min_members,
+            Anime.status.is_distinct_from(STATUS_NOT_YET_AIRED),
+            started > 0,
+            *self._aggregate_conditions(filters),
+        ]
+        joined = Anime.__table__.join(
+            AnimeStatisticsMal.__table__, AnimeStatisticsMal.anime_id == Anime.mal_id
+        )
+        total = (
+            await self.db.execute(select(func.count()).select_from(joined).where(*conditions))
+        ).scalar_one()
+        rows = await self.db.execute(
+            select(
+                Anime.mal_id,
+                Anime.title,
+                Anime.type,
+                Anime.year,
+                Anime.mal_score,
+                Anime.members_mal,
+                AnimeStatisticsMal.dropped,
+                started.label("started"),
+                drop_rate,
+            )
+            .select_from(joined)
+            .where(*conditions)
+            .order_by(drop_rate.desc(), Anime.members_mal.desc(), Anime.mal_id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return (
+            [
+                {
+                    "mal_id": row.mal_id,
+                    "title": row.title,
+                    "type": row.type,
+                    "year": row.year,
+                    "mal_score": _as_float(row.mal_score),
+                    "members_mal": row.members_mal,
+                    "dropped": row.dropped,
+                    "started": row.started,
+                    "drop_rate": float(row.drop_rate),
+                }
                 for row in rows.all()
             ],
             total,
