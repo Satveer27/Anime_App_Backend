@@ -293,6 +293,11 @@ class TestWhatIsCached:
         await service.most_dropped(None, None, None, 50, 0)
         assert spy_cache.get_or_set.await_count == 2
 
+    @pytest.fixture(autouse=True)
+    def fixed_today(self, mocker):
+        """Today is in fall 2026, so the presets for this year and this season are fixed."""
+        mocker.patch("app.anime.service.current_season", return_value=(AnimeSeason.FALL, 2026))
+
     async def test_the_plain_list_is_cached_for_its_first_ten_pages_only(
         self, spy_cache, read_repository
     ):
@@ -383,12 +388,78 @@ class TestWhatIsCached:
             {"status": [AnimeStatus.AIRING], "tag_id": [1]},
             {"status": [AnimeStatus.AIRING], "type": [AnimeType.TV]},
             {"status": [AnimeStatus.AIRING], "q": "naruto"},
-            {"status": [AnimeStatus.AIRING], "year": 2026},
+            {"status": [AnimeStatus.AIRING], "year_to": 2026},
             {"status": [AnimeStatus.AIRING], "season": [AnimeSeason.FALL]},
             {"status": [AnimeStatus.AIRING], "limit": 30},
         ],
     )
     async def test_other_status_filters_are_not_a_preset(self, spy_cache, read_repository, change):
+        service = AnimeListService(read_repository, spy_cache)
+
+        await service.list_anime(**{**LIST_BASE, **change})
+
+        spy_cache.get_or_set.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [AnimeStatus.AIRING, AnimeStatus.UPCOMING])
+    async def test_a_status_that_started_this_year_is_cached(
+        self, spy_cache, read_repository, status
+    ):
+        """The main page's "top airing": a show that premiered in winter and still airs."""
+        service = AnimeListService(read_repository, spy_cache)
+
+        await service.list_anime(**{**LIST_BASE, "status": [status], "year": 2026})
+        await service.list_anime(**{**LIST_BASE, "status": [status], "year": 2026, "offset": 60})
+        await service.list_anime(**{**LIST_BASE, "status": [status], "year_from": 2025})
+        assert spy_cache.get_or_set.await_count == 3
+
+    async def test_airing_this_year_and_airing_since_last_year_are_two_different_keys(
+        self, spy_cache, read_repository
+    ):
+        service = AnimeListService(read_repository, spy_cache)
+        airing = {**LIST_BASE, "status": [AnimeStatus.AIRING]}
+
+        await service.list_anime(**{**airing, "year": 2026})
+        await service.list_anime(**{**airing, "year_from": 2025})
+
+        keys = [call.args[0] for call in spy_cache.get_or_set.await_args_list]
+        assert "year=2026" in keys[0] and "year_from=None" in keys[0]
+        assert "year=None" in keys[1] and "year_from=2025" in keys[1]
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"year": 2025},  # not this year
+            {"year": 2027},
+            {"year_from": 2020},  # not last year
+            {"year_from": 2026},
+            {"year_from": 2025, "year_to": 2026},
+            {"year": 2026, "season": [AnimeSeason.WINTER]},  # a status and a season
+            {"year": 2026, "min_score": 7.0},
+            {"year": 2026, "tag_id": [1]},
+            {"year": 2026, "offset": 1020},
+        ],
+    )
+    async def test_airing_with_any_other_year_filter_is_not_a_preset(
+        self, spy_cache, read_repository, change
+    ):
+        service = AnimeListService(read_repository, spy_cache)
+
+        await service.list_anime(**{**LIST_BASE, "status": [AnimeStatus.AIRING], **change})
+
+        spy_cache.get_or_set.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"status": [AnimeStatus.FINISHED], "year": 2026},
+            {"status": [AnimeStatus.FINISHED], "year_from": 2025},
+            {"year": 2026},  # a year without a status or season is not a preset
+            {"year_from": 2025},
+        ],
+    )
+    async def test_a_year_alone_or_with_finished_is_not_a_preset(
+        self, spy_cache, read_repository, change
+    ):
         service = AnimeListService(read_repository, spy_cache)
 
         await service.list_anime(**{**LIST_BASE, **change})

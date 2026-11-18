@@ -48,6 +48,31 @@ with httpx.Client(timeout=60) as client:
     walk(client, "upcoming, by members", {"status": "upcoming", "sort": "members"}, 20, 300)
     walk(
         client,
+        "airing + year 2026, by members",
+        {"status": "airing", "year": 2026, "sort": "members"},
+        20,
+        400,
+    )
+    walk(
+        client,
+        "airing + year_from 2025, by members",
+        {"status": "airing", "year_from": 2025, "sort": "members"},
+        50,
+        400,
+    )
+    # the show that premiered in winter and still airs must be in the airing-this-year list
+    _, page = timed(client, {"status": "airing", "year": 2026, "sort": "members", "limit": 100})
+    sbr = [i for i in page["items"] if "Steel Ball Run" in i["title"]]
+    print(
+        "Steel Ball Run in airing + year 2026:", bool(sbr), [(i["season"], i["year"]) for i in sbr]
+    )
+    _, page = timed(client, {"season": "fall", "year": 2026, "sort": "members", "limit": 100})
+    print(
+        "Steel Ball Run in season fall 2026:",
+        any("Steel Ball Run" in i["title"] for i in page["items"]),
+    )
+    walk(
+        client,
         "fall 2026 (current), by score",
         {"season": "fall", "year": 2026, "sort": "score"},
         20,
@@ -64,6 +89,7 @@ with httpx.Client(timeout=60) as client:
         {"status": "finished", "sort": "members"},
         {"season": "summer", "year": 2026, "sort": "score"},  # last season
         {"status": "airing", "min_score": 7},
+        {"status": "airing", "year": 2025},  # not this year
     ):
         timed(client, params)
     print(f"keys after four requests that must not be cached: {keys() - t_before} new")
