@@ -25,6 +25,7 @@ from app.catalogue.read_repository import (
     CatalogueReadRepository,
     statement_timeout_to_503,
 )
+from app.core.cache import ResponseCache, cached
 
 logger = structlog.get_logger()
 
@@ -59,10 +60,21 @@ def fixed_options() -> dict:
     }
 
 
-class OptionsService:
-    def __init__(self, read_repository: CatalogueReadRepository):
-        self.read_repository = read_repository
+def _default_studio_page(args: dict) -> bool:
+    """Only the unsearched first page of the default studio list."""
+    return (
+        args["q"] is None and args["min_anime"] == 1 and args["limit"] == 20 and args["offset"] == 0
+    )
 
+
+class OptionsService:
+    def __init__(
+        self, read_repository: CatalogueReadRepository, cache: ResponseCache | None = None
+    ):
+        self.read_repository = read_repository
+        self.cache = cache
+
+    @cached("filter_options", FilterOptionsResponse)
     async def filter_options(self) -> FilterOptionsResponse:
         with statement_timeout_to_503("filter_options"):
             tags = await self.read_repository.list_tags()
@@ -75,6 +87,7 @@ class OptionsService:
             tags=[TagOptionSchema(**tag) for tag in tags],
         )
 
+    @cached("studio_list", StudioListResponse, cacheable=_default_studio_page)
     async def list_studios(
         self,
         q: str | None,

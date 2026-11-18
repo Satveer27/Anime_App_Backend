@@ -1,3 +1,5 @@
+from datetime import UTC, date, datetime
+
 import structlog
 
 from app.anime.schemas import AnimeListItemSchema, AnimeListResponse
@@ -17,15 +19,75 @@ from app.catalogue.read_repository import (
     CatalogueReadRepository,
     statement_timeout_to_503,
 )
+from app.core.cache import ResponseCache, cached
 from app.exceptions import BadRequestError
 
 logger = structlog.get_logger()
 
 
-class AnimeListService:
-    def __init__(self, read_repository: CatalogueReadRepository):
-        self.read_repository = read_repository
+# Page sizes the frontend may ask for. Any other size is not cached.
+CACHED_PAGE_SIZES = (20, 50, 100)
+# The plain list is cached for its first pages only: deeper pages are rarely read, and the
+# number of different offsets is large.
+UNFILTERED_CACHED_PAGES = 10
+# The presets (airing, upcoming, the current season) have a few hundred anime each (271, 233 and
+# 115 on 18 Nov 2026), so every page is cached, up to this offset. The cap keeps a client that
+# asks for offsets far past the end from creating a key for each.
+PRESET_MAX_OFFSET = 1000
+PRESET_STATUSES = (AnimeStatus.AIRING, AnimeStatus.UPCOMING)
+# Everything but status, season, year and the paging must be unset for a request to be cached.
+_UNSET_FOR_CACHE = (
+    "q",
+    "type",
+    "year_from",
+    "year_to",
+    "tag_id",
+    "studio_id",
+    "min_score",
+    "min_ratings",
+)
 
+
+def current_season(today: date | None = None) -> tuple[AnimeSeason, int]:
+    """The season and year of today's date, with MAL's calendar (winter is January to March)."""
+    today = today or datetime.now(UTC).date()
+    seasons = (AnimeSeason.WINTER, AnimeSeason.SPRING, AnimeSeason.SUMMER, AnimeSeason.FALL)
+    return seasons[(today.month - 1) // 3], today.year
+
+
+def _cacheable_list(args: dict) -> bool:
+    """The plain list's first pages and every page of the presets, in any sort order.
+
+    Presets are a single `status` of airing or upcoming, or the current season and year. The page
+    size must be one of CACHED_PAGE_SIZES and the offset a multiple of it, so the pages are the
+    ones a frontend walks through, not arbitrary offsets.
+    """
+    limit, offset = args["limit"], args["offset"]
+    if limit not in CACHED_PAGE_SIZES or offset % limit != 0:
+        return False
+    if args["tag_match"] is not TagMatch.ALL or any(args[n] is not None for n in _UNSET_FOR_CACHE):
+        return False
+    status, season, year = args["status"], args["season"], args["year"]
+    if status is None and season is None and year is None:
+        return offset < UNFILTERED_CACHED_PAGES * limit
+    if offset > PRESET_MAX_OFFSET:
+        return False
+    if season is None and year is None:
+        return status is not None and len(status) == 1 and status[0] in PRESET_STATUSES
+    if status is None and season is not None and year is not None:
+        now_season, now_year = current_season()
+        return list(season) == [now_season] and year == now_year
+    return False
+
+
+class AnimeListService:
+    def __init__(
+        self, read_repository: CatalogueReadRepository, cache: ResponseCache | None = None
+    ):
+        self.read_repository = read_repository
+        self.cache = cache
+
+    @cached("anime_list", AnimeListResponse, cacheable=_cacheable_list)
     async def list_anime(
         self,
         *,

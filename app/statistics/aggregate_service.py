@@ -6,6 +6,7 @@ from app.catalogue.read_repository import (
     CatalogueReadRepository,
     statement_timeout_to_503,
 )
+from app.core.cache import ResponseCache, cached
 from app.exceptions import BadRequestError
 from app.statistics.aggregate_schemas import (
     BySeasonResponse,
@@ -26,13 +27,35 @@ logger = structlog.get_logger()
 # than the per-anime `low_sample` bar (500): a group averages many anime, so one anime's noisy
 # score matters less, and a higher bar left out most small studios and tags.
 MIN_RATINGS = 50
+# The by-studio defaults (the controller's), the only page that is cached.
+DEFAULT_MIN_ANIME = 10
+DEFAULT_PAGE_SIZE = 20
 # Digits kept in the scores of a group row.
 SCORE_DIGITS = 3
 
 
+def _default_scores(args: dict) -> bool:
+    """Cache only the unfiltered request: a year range makes the key space unbounded."""
+    return (
+        args["year_from"] is None and args["year_to"] is None and args["min_ratings"] == MIN_RATINGS
+    )
+
+
+def _default_studios(args: dict) -> bool:
+    return (
+        _default_scores(args)
+        and args["min_anime"] == DEFAULT_MIN_ANIME
+        and args["limit"] == DEFAULT_PAGE_SIZE
+        and args["offset"] == 0
+    )
+
+
 class AggregateService:
-    def __init__(self, read_repository: CatalogueReadRepository):
+    def __init__(
+        self, read_repository: CatalogueReadRepository, cache: ResponseCache | None = None
+    ):
         self.read_repository = read_repository
+        self.cache = cache
 
     @staticmethod
     def _filters(type: AnimeType | None, year_from: int | None, year_to: int | None):
@@ -53,6 +76,7 @@ class AggregateService:
     def _served(self, endpoint: str, count: int, **fields) -> None:
         logger.info("aggregate_served", endpoint=endpoint, rows=count, **fields)
 
+    @cached("aggregate_by_year", ByYearResponse, cacheable=_default_scores)
     async def by_year(
         self,
         type: AnimeType | None,
@@ -69,6 +93,7 @@ class AggregateService:
             items=[YearRowSchema(**self._round(row)) for row in rows],
         )
 
+    @cached("aggregate_by_type", ByTypeResponse, cacheable=_default_scores)
     async def by_type(
         self, year_from: int | None, year_to: int | None, min_ratings: int = MIN_RATINGS
     ) -> ByTypeResponse:
@@ -89,6 +114,7 @@ class AggregateService:
             )
         return ByTypeResponse(min_ratings=min_ratings, items=items)
 
+    @cached("aggregate_by_season", BySeasonResponse, cacheable=_default_scores)
     async def by_season(
         self,
         type: AnimeType | None,
@@ -105,6 +131,7 @@ class AggregateService:
             items=[SeasonRowSchema(**self._round(row)) for row in rows],
         )
 
+    @cached("aggregate_by_tag", ByTagResponse, cacheable=_default_scores)
     async def by_tag(
         self,
         type: AnimeType | None,
@@ -123,6 +150,7 @@ class AggregateService:
             items=[TagRowSchema(**self._round(row)) for row in rows],
         )
 
+    @cached("aggregate_by_studio", ByStudioResponse, cacheable=_default_studios)
     async def by_studio(
         self,
         type: AnimeType | None,
