@@ -15,8 +15,14 @@ aggregate_router = APIRouter(prefix="/statistics", tags=["statistics"])
 
 # Public and read-only: no auth, rate limiting is nginx's job (see the epic, #49).
 _SCORES_NOTE = (
-    f"Scores use only anime with a score and at least {MIN_RATINGS} ratings; "
+    f"Scores use only anime with a score and at least `min_ratings` ratings (default {MIN_RATINGS}); "
     "`scored_count` says how many that is."
+)
+MIN_RATINGS_QUERY = Query(
+    MIN_RATINGS,
+    ge=0,
+    le=100_000,
+    description="Anime need at least this many MAL ratings to count in the score numbers",
 )
 TYPE_FILTER = Query(None, description="Only anime of this type")
 YEAR_FROM = Query(
@@ -37,9 +43,10 @@ async def by_year(
     type: AnimeType | None = TYPE_FILTER,
     year_from: int | None = YEAR_FROM,
     year_to: int | None = YEAR_TO,
+    min_ratings: int = MIN_RATINGS_QUERY,
     service: AggregateService = Depends(create_aggregate_service),
 ):
-    return await service.by_year(type, year_from, year_to)
+    return await service.by_year(type, year_from, year_to, min_ratings)
 
 
 @aggregate_router.get(
@@ -51,9 +58,10 @@ async def by_year(
 async def by_type(
     year_from: int | None = YEAR_FROM,
     year_to: int | None = YEAR_TO,
+    min_ratings: int = MIN_RATINGS_QUERY,
     service: AggregateService = Depends(create_aggregate_service),
 ):
-    return await service.by_type(year_from, year_to)
+    return await service.by_type(year_from, year_to, min_ratings)
 
 
 @aggregate_router.get(
@@ -66,9 +74,10 @@ async def by_season(
     type: AnimeType | None = TYPE_FILTER,
     year_from: int | None = YEAR_FROM,
     year_to: int | None = YEAR_TO,
+    min_ratings: int = MIN_RATINGS_QUERY,
     service: AggregateService = Depends(create_aggregate_service),
 ):
-    return await service.by_season(type, year_from, year_to)
+    return await service.by_season(type, year_from, year_to, min_ratings)
 
 
 @aggregate_router.get(
@@ -87,9 +96,10 @@ async def by_tag(
     year_to: int | None = YEAR_TO,
     sort: GroupSort = Query(GroupSort.ANIME_COUNT),
     order: Order = Query(Order.DESC),
+    min_ratings: int = MIN_RATINGS_QUERY,
     service: AggregateService = Depends(create_aggregate_service),
 ):
-    return await service.by_tag(type, year_from, year_to, sort, order)
+    return await service.by_tag(type, year_from, year_to, sort, order, min_ratings)
 
 
 @aggregate_router.get(
@@ -110,6 +120,9 @@ async def by_studio(
     order: Order = Query(Order.DESC),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0, le=10_000),
+    min_ratings: int = MIN_RATINGS_QUERY,
     service: AggregateService = Depends(create_aggregate_service),
 ):
-    return await service.by_studio(type, year_from, year_to, min_anime, sort, order, limit, offset)
+    return await service.by_studio(
+        type, year_from, year_to, min_anime, sort, order, limit, offset, min_ratings
+    )

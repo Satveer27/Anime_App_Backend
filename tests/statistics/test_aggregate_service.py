@@ -44,21 +44,22 @@ def service(repository):
 
 
 class TestThreshold:
-    def test_the_minimum_ratings_match_the_low_sample_bar(self):
-        assert MIN_RATINGS == LOW_SAMPLE_VOTES == 500
+    def test_the_minimum_ratings_are_50_and_separate_from_the_low_sample_bar(self):
+        assert MIN_RATINGS == 50
+        assert LOW_SAMPLE_VOTES == 500  # the per-anime low_sample bar is a separate, stricter one
 
     async def test_every_response_says_which_minimum_it_used(self, service):
-        assert (await service.by_year(None, None, None)).min_ratings == 500
-        assert (await service.by_type(None, None)).min_ratings == 500
-        assert (await service.by_season(None, None, None)).min_ratings == 500
+        assert (await service.by_year(None, None, None)).min_ratings == 50
+        assert (await service.by_type(None, None)).min_ratings == 50
+        assert (await service.by_season(None, None, None)).min_ratings == 50
         assert (
             await service.by_tag(None, None, None, GroupSort.ANIME_COUNT, Order.DESC)
-        ).min_ratings == 500
+        ).min_ratings == 50
 
     async def test_the_minimum_is_passed_to_the_queries(self, service, repository):
         await service.by_year(None, None, None)
 
-        assert repository.stats_by_year.call_args.args[1] == 500
+        assert repository.stats_by_year.call_args.args[1] == 50
 
 
 class TestByYear:
@@ -169,7 +170,7 @@ class TestByStudio:
         assert (result.total, result.limit, result.offset, result.min_anime) == (194, 20, 40, 10)
         assert result.items[0].studio_id == 5
         args = repository.stats_by_studio.call_args.args
-        assert args[1:] == (500, 10, GroupSort.MEAN_SCORE, Order.DESC, 20, 40)
+        assert args[1:] == (50, 10, GroupSort.MEAN_SCORE, Order.DESC, 20, 40)
 
     async def test_an_empty_page_past_the_end_keeps_the_total(self, service, repository):
         repository.stats_by_studio.return_value = ([], 194)
@@ -209,3 +210,30 @@ class TestTimeouts:
             await call(service)
 
         assert [e["event"] for e in logs].count("statement_timeout") == 1
+
+
+class TestChosenMinRatings:
+    async def test_the_chosen_minimum_reaches_the_query_and_the_response(self, service, repository):
+        year = await service.by_year(None, None, None, 200)
+        kind = await service.by_type(None, None, 200)
+        season = await service.by_season(None, None, None, 200)
+        tag = await service.by_tag(None, None, None, GroupSort.ANIME_COUNT, Order.DESC, 200)
+        studio = await service.by_studio(
+            None, None, None, 10, GroupSort.ANIME_COUNT, Order.DESC, 20, 0, 200
+        )
+
+        assert [r.min_ratings for r in (year, kind, season, tag, studio)] == [200] * 5
+        assert repository.stats_by_year.call_args.args[1] == 200
+        assert repository.stats_by_type.call_args.args[1] == 200
+        assert repository.stats_by_season.call_args.args[1] == 200
+        assert repository.stats_by_tag.call_args.args[1] == 200
+        assert repository.stats_by_studio.call_args.args[1] == 200
+
+    async def test_zero_is_allowed_and_means_every_scored_anime(self, service, repository):
+        result = await service.by_year(None, None, None, 0)
+
+        assert result.min_ratings == 0
+        assert repository.stats_by_year.call_args.args[1] == 0
+
+    async def test_the_default_is_still_50(self, service):
+        assert (await service.by_year(None, None, None)).min_ratings == MIN_RATINGS == 50

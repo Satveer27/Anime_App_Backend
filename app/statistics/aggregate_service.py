@@ -19,14 +19,13 @@ from app.statistics.aggregate_schemas import (
     TypeRowSchema,
     YearRowSchema,
 )
-from app.statistics.service import LOW_SAMPLE_VOTES
 
 logger = structlog.get_logger()
 
-# An anime needs at least this many MAL ratings to count in a group's score numbers: the same
-# bar as the per-anime `low_sample` flag, so a score is never trusted in one place and not in
-# the other.
-MIN_RATINGS = LOW_SAMPLE_VOTES
+# An anime needs at least this many MAL ratings to count in a group's score numbers. It is lower
+# than the per-anime `low_sample` bar (500): a group averages many anime, so one anime's noisy
+# score matters less, and a higher bar left out most small studios and tags.
+MIN_RATINGS = 50
 # Digits kept in the scores of a group row.
 SCORE_DIGITS = 3
 
@@ -55,21 +54,27 @@ class AggregateService:
         logger.info("aggregate_served", endpoint=endpoint, rows=count, **fields)
 
     async def by_year(
-        self, type: AnimeType | None, year_from: int | None, year_to: int | None
+        self,
+        type: AnimeType | None,
+        year_from: int | None,
+        year_to: int | None,
+        min_ratings: int = MIN_RATINGS,
     ) -> ByYearResponse:
         filters = self._filters(type, year_from, year_to)
         with statement_timeout_to_503("statistics_by_year"):
-            rows = await self.read_repository.stats_by_year(filters, MIN_RATINGS)
+            rows = await self.read_repository.stats_by_year(filters, min_ratings)
         self._served("by_year", len(rows))
         return ByYearResponse(
-            min_ratings=MIN_RATINGS,
+            min_ratings=min_ratings,
             items=[YearRowSchema(**self._round(row)) for row in rows],
         )
 
-    async def by_type(self, year_from: int | None, year_to: int | None) -> ByTypeResponse:
+    async def by_type(
+        self, year_from: int | None, year_to: int | None, min_ratings: int = MIN_RATINGS
+    ) -> ByTypeResponse:
         filters = self._filters(None, year_from, year_to)
         with statement_timeout_to_503("statistics_by_type"):
-            rows = await self.read_repository.stats_by_type(filters, MIN_RATINGS)
+            rows = await self.read_repository.stats_by_type(filters, min_ratings)
         self._served("by_type", len(rows))
         items = []
         for row in rows:
@@ -82,17 +87,21 @@ class AggregateService:
                     **self._round(row),
                 )
             )
-        return ByTypeResponse(min_ratings=MIN_RATINGS, items=items)
+        return ByTypeResponse(min_ratings=min_ratings, items=items)
 
     async def by_season(
-        self, type: AnimeType | None, year_from: int | None, year_to: int | None
+        self,
+        type: AnimeType | None,
+        year_from: int | None,
+        year_to: int | None,
+        min_ratings: int = MIN_RATINGS,
     ) -> BySeasonResponse:
         filters = self._filters(type, year_from, year_to)
         with statement_timeout_to_503("statistics_by_season"):
-            rows = await self.read_repository.stats_by_season(filters, MIN_RATINGS)
+            rows = await self.read_repository.stats_by_season(filters, min_ratings)
         self._served("by_season", len(rows))
         return BySeasonResponse(
-            min_ratings=MIN_RATINGS,
+            min_ratings=min_ratings,
             items=[SeasonRowSchema(**self._round(row)) for row in rows],
         )
 
@@ -103,13 +112,14 @@ class AggregateService:
         year_to: int | None,
         sort: GroupSort,
         order: Order,
+        min_ratings: int = MIN_RATINGS,
     ) -> ByTagResponse:
         filters = self._filters(type, year_from, year_to)
         with statement_timeout_to_503("statistics_by_tag"):
-            rows = await self.read_repository.stats_by_tag(filters, MIN_RATINGS, sort, order)
+            rows = await self.read_repository.stats_by_tag(filters, min_ratings, sort, order)
         self._served("by_tag", len(rows), sort=sort.value)
         return ByTagResponse(
-            min_ratings=MIN_RATINGS,
+            min_ratings=min_ratings,
             items=[TagRowSchema(**self._round(row)) for row in rows],
         )
 
@@ -123,15 +133,16 @@ class AggregateService:
         order: Order,
         limit: int,
         offset: int,
+        min_ratings: int = MIN_RATINGS,
     ) -> ByStudioResponse:
         filters = self._filters(type, year_from, year_to)
         with statement_timeout_to_503("statistics_by_studio"):
             rows, total = await self.read_repository.stats_by_studio(
-                filters, MIN_RATINGS, min_anime, sort, order, limit, offset
+                filters, min_ratings, min_anime, sort, order, limit, offset
             )
         self._served("by_studio", len(rows), total=total, sort=sort.value)
         return ByStudioResponse(
-            min_ratings=MIN_RATINGS,
+            min_ratings=min_ratings,
             min_anime=min_anime,
             total=total,
             limit=limit,

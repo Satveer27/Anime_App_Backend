@@ -33,19 +33,19 @@ STATS = {
 def fake_service(mocker, client):
     fake = mocker.create_autospec(AggregateService, instance=True)
     fake.by_year.return_value = ByYearResponse(
-        min_ratings=500, items=[YearRowSchema(year=2020, **STATS)]
+        min_ratings=50, items=[YearRowSchema(year=2020, **STATS)]
     )
     fake.by_type.return_value = ByTypeResponse(
-        min_ratings=500, items=[TypeRowSchema(type="tv", label="TV", **STATS)]
+        min_ratings=50, items=[TypeRowSchema(type="tv", label="TV", **STATS)]
     )
     fake.by_season.return_value = BySeasonResponse(
-        min_ratings=500, items=[SeasonRowSchema(season="fall", **STATS)]
+        min_ratings=50, items=[SeasonRowSchema(season="fall", **STATS)]
     )
     fake.by_tag.return_value = ByTagResponse(
-        min_ratings=500, items=[TagRowSchema(tag_id=1, name="Action", **STATS)]
+        min_ratings=50, items=[TagRowSchema(tag_id=1, name="Action", **STATS)]
     )
     fake.by_studio.return_value = ByStudioResponse(
-        min_ratings=500, min_anime=10, total=1, limit=20, offset=0,
+        min_ratings=50, min_anime=10, total=1, limit=20, offset=0,
         items=[StudioRowSchema(studio_id=2, name="Studio", **STATS)],
     )  # fmt: skip
     app.dependency_overrides[create_aggregate_service] = lambda: fake
@@ -57,7 +57,7 @@ class TestResponses:
         body = client.get(f"{BASE}/by-year").json()
 
         ByYearResponse.model_validate(body)
-        assert body["min_ratings"] == 500
+        assert body["min_ratings"] == 50
         assert body["items"][0] == {"year": 2020, **STATS}
 
     def test_by_type(self, client, fake_service):
@@ -91,32 +91,32 @@ class TestParameters:
     def test_by_year_passes_its_filters(self, client, fake_service):
         client.get(f"{BASE}/by-year?type=tv&year_from=2010&year_to=2020")
 
-        fake_service.by_year.assert_awaited_once_with(AnimeType.TV, 2010, 2020)
+        fake_service.by_year.assert_awaited_once_with(AnimeType.TV, 2010, 2020, 50)
 
     def test_by_type_takes_only_the_year_range(self, client, fake_service):
         client.get(f"{BASE}/by-type?year_from=2010&year_to=2020")
 
-        fake_service.by_type.assert_awaited_once_with(2010, 2020)
+        fake_service.by_type.assert_awaited_once_with(2010, 2020, 50)
 
     def test_by_tag_defaults_to_most_anime_first(self, client, fake_service):
         client.get(f"{BASE}/by-tag")
 
         fake_service.by_tag.assert_awaited_once_with(
-            None, None, None, GroupSort.ANIME_COUNT, Order.DESC
+            None, None, None, GroupSort.ANIME_COUNT, Order.DESC, 50
         )
 
     def test_by_tag_sort_and_order(self, client, fake_service):
         client.get(f"{BASE}/by-tag?sort=mean_score&order=asc&type=movie")
 
         fake_service.by_tag.assert_awaited_once_with(
-            AnimeType.MOVIE, None, None, GroupSort.MEAN_SCORE, Order.ASC
+            AnimeType.MOVIE, None, None, GroupSort.MEAN_SCORE, Order.ASC, 50
         )
 
     def test_by_studio_defaults(self, client, fake_service):
         client.get(f"{BASE}/by-studio")
 
         fake_service.by_studio.assert_awaited_once_with(
-            None, None, None, 10, GroupSort.ANIME_COUNT, Order.DESC, 20, 0
+            None, None, None, 10, GroupSort.ANIME_COUNT, Order.DESC, 20, 0, 50
         )
 
     def test_by_studio_passes_everything(self, client, fake_service):
@@ -125,7 +125,7 @@ class TestParameters:
         )
 
         fake_service.by_studio.assert_awaited_once_with(
-            AnimeType.TV, 2000, None, 5, GroupSort.TOTAL_MEMBERS, Order.ASC, 50, 100
+            AnimeType.TV, 2000, None, 5, GroupSort.TOTAL_MEMBERS, Order.ASC, 50, 100, 50
         )
 
     @pytest.mark.parametrize(
@@ -158,7 +158,7 @@ class TestParameters:
     def test_by_type_has_no_type_filter(self, client, fake_service):
         client.get(f"{BASE}/by-type?type=tv")  # an unknown parameter is ignored, not an error
 
-        fake_service.by_type.assert_awaited_once_with(None, None)
+        fake_service.by_type.assert_awaited_once_with(None, None, 50)
 
 
 class TestErrors:
@@ -173,3 +173,44 @@ class TestErrors:
         fake_service.by_studio.side_effect = ServiceUnavailableError()
 
         assert client.get(f"{BASE}/by-studio").status_code == 503
+
+
+ENDPOINTS = ["by-year", "by-type", "by-season", "by-tag", "by-studio"]
+SERVICE_METHODS = {
+    "by-year": "by_year",
+    "by-type": "by_type",
+    "by-season": "by_season",
+    "by-tag": "by_tag",
+    "by-studio": "by_studio",
+}
+
+
+class TestMinRatings:
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    def test_it_defaults_to_50(self, client, fake_service, path):
+        client.get(f"{BASE}/{path}")
+
+        call = getattr(fake_service, SERVICE_METHODS[path]).await_args
+        assert call.args[-1] == 50
+
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    def test_a_chosen_value_is_passed_on(self, client, fake_service, path):
+        client.get(f"{BASE}/{path}?min_ratings=500")
+
+        call = getattr(fake_service, SERVICE_METHODS[path]).await_args
+        assert call.args[-1] == 500
+
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    @pytest.mark.parametrize("value", [0, 100000])
+    def test_the_boundaries_are_accepted(self, client, fake_service, path, value):
+        assert client.get(f"{BASE}/{path}?min_ratings={value}").status_code == 200
+
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    @pytest.mark.parametrize("value", ["-1", "100001", "abc", "1.5"])
+    def test_outside_0_to_100000_is_422_and_never_reaches_the_service(
+        self, client, fake_service, path, value
+    ):
+        response = client.get(f"{BASE}/{path}?min_ratings={value}")
+
+        assert response.status_code == 422
+        getattr(fake_service, SERVICE_METHODS[path]).assert_not_called()

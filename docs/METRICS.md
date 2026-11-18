@@ -601,3 +601,11 @@ Sizes over a random sample: the per-anime statistics response is **avg 11.0 KiB,
 | per-anime episodes | a primary-key read | one key per anime | **do not cache**: One Piece alone is 1.3 MB; if ever cached, compress and skip entries over a size limit |
 
 Re-run `analysis/bench_endpoints.py` and `analysis/bench_aggregates.py` after the migrations are applied on RDS, and again after Redis is in, to compare.
+
+### The aggregates' minimum ratings, lowered from 500 to 50 (18 Nov 2026)
+
+An anime counts in a group's score numbers only if it has a score and at least `MIN_RATINGS` MAL ratings. The aggregates used 500, the same bar as the per-anime `low_sample` flag, and left out most small studios and tags, so it was lowered to **50** and decoupled from `low_sample` (which stays at 500, as does the hidden-gem exclusion). Effect on the real catalogue (by-type, summed): anime with a trusted score **11,224 of 23,086 (49%) at 500, 15,379 (67%) at 50**; the TV average moved from 7.00 to 6.88, because more obscure, lower-rated anime now count (movies 6.78 to 6.38, ONA 6.62 to 6.28). Studios that qualify with at least 30 scored anime went from 84 to 99. The timings in sections 10 and 11 were taken with 500; the threshold only changes a `FILTER` on the same scan, so they were not re-measured.
+
+### `min_ratings` is now a query parameter on the five aggregates (18 Nov 2026)
+
+`GET /api/v1/statistics/by-year`, `by-type`, `by-season`, `by-tag` and `by-studio` take `min_ratings` (0 to 100,000, default 50), and each response reports the value used. `by-studio` also keeps its own `min_anime` (the minimum scored anime per studio, default 10). On RDS, `by-type` for TV gives 5,490 scored anime of 8,580 (mean 6.876) at both `min_ratings=0` and 50, and 4,776 (mean 6.997) at 500: MAL publishes a score only once an anime has about 50 ratings, so values below 50 change nothing and raising it is what excludes anime. `by-type` and `by-season` already took `year_from` and `year_to`, so a single year or any range works (for example TV by season in 2025: winter 6.85, spring 6.84, summer 7.16, fall 6.94).
