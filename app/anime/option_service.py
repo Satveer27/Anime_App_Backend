@@ -18,12 +18,10 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     StudioSort,
     TagMatch,
 )
 from app.catalogue.read_repository import (
-    RELEASING_WITHIN_DAYS,
     CatalogueReadRepository,
     statement_timeout_to_503,
 )
@@ -36,23 +34,7 @@ SORT_LABELS = {
     AnimeSort.SCORE: ("Highest score", None),
     AnimeSort.FAVORITES: ("Most favorites", None),
     AnimeSort.NEWEST: ("Newest first", "By the date the anime started airing"),
-    AnimeSort.LATEST_EPISODE: (
-        "Latest episode",
-        "By the date of the latest released episode; meant to be used with a filter such as "
-        "status=airing",
-    ),
     AnimeSort.TITLE: ("Title", "A to Z unless order=desc"),
-}
-RELEASE_LABELS = {
-    ReleaseStatus.RELEASING: (
-        "Releasing now",
-        f"An episode aired in the last {RELEASING_WITHIN_DAYS} days",
-    ),
-    ReleaseStatus.ON_BREAK: (
-        "On a break",
-        f"Airing, but no episode in the last {RELEASING_WITHIN_DAYS} days",
-    ),
-    ReleaseStatus.NO_EPISODE_DATA: ("No episode data", "Airing, but we hold no episodes for it"),
 }
 
 
@@ -62,12 +44,6 @@ def fixed_options() -> dict:
         "types": [OptionSchema(value=t.value, label=STORED_TYPE[t]) for t in AnimeType],
         "statuses": [OptionSchema(value=s.value, label=STORED_STATUS[s]) for s in AnimeStatus],
         "seasons": [OptionSchema(value=s.value, label=s.value.title()) for s in AnimeSeason],
-        "release_statuses": [
-            OptionSchema(
-                value=r.value, label=RELEASE_LABELS[r][0], description=RELEASE_LABELS[r][1]
-            )
-            for r in ReleaseStatus
-        ],
         "sorts": [
             OptionSchema(value=s.value, label=SORT_LABELS[s][0], description=SORT_LABELS[s][1])
             for s in AnimeSort

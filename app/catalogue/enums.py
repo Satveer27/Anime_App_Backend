@@ -32,18 +32,6 @@ class AnimeSeason(StrEnum):
     FALL = "fall"
 
 
-class ReleaseStatus(StrEnum):
-    """Whether an anime is really putting episodes out, judged from its episode air dates.
-
-    MAL's status says "Currently Airing" for a show on a long break (One Piece between arcs), so
-    this looks at the episodes themselves.
-    """
-
-    RELEASING = "releasing"  # an episode aired in the last RELEASING_WITHIN_DAYS days
-    ON_BREAK = "on_break"  # airing, has aired episodes, but none in that window
-    NO_EPISODE_DATA = "no_episode_data"  # airing, but we hold no episodes for it
-
-
 class TagMatch(StrEnum):
     """With several tags: the anime must have `all` of them, or `any` one."""
 
@@ -59,7 +47,6 @@ class AnimeSort(StrEnum):
     SCORE = "score"
     FAVORITES = "favorites"
     NEWEST = "newest"
-    LATEST_EPISODE = "latest_episode"
     TITLE = "title"
 
 

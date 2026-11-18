@@ -469,7 +469,7 @@ The two extra metrics cost about 5 ms for a one-season show and 35 ms for One Pi
 | list, all anime, by title | 87 ms | 5.7 + 36.3 | seq scan |
 | list, airing, by members | 63 ms | 6.5 + 6.7 | seq scan (271 rows match) |
 | list, TV 2019, by score | 50 ms | 0.4 + 0.5 | bitmap scan on `ix_anime_type_year` |
-| list, tag 1 (Action), by score | 80 ms | 15.3 + 16.9 | seq scan `anime`, seq scan `anime_tag` |
+| list, tag 1 (Action), by score | 3 | 173 ms | 9.0 KiB | 15.3 + 16.9 |
 | list, tag 1 + year 2019, by score | 54 ms | 1.7 + 1.7 | bitmap scan on `ix_anime_type_year` |
 | list, one studio, newest | 54 ms | 1.6 + 2.1 | seq scan `anime_studio` |
 | **list, search "titan"** | **263 ms** | **105.8 + 106.1** | seq scan, six ILIKEs per row |
@@ -477,9 +477,9 @@ The two extra metrics cost about 5 ms for a one-season show and 35 ms for One Pi
 | list, search "a" (5,058 matches) | 250 ms | 90.5 + 108.2 | seq scan |
 | by-year | 53 ms | 22.9 | seq scan |
 | by-year, TV only | 45 ms | 12.7 | bitmap scan on `ix_anime_type_year` |
-| by-type | 54 ms | 24.6 | seq scan |
-| by-season | 52 ms | 26.5 | seq scan |
-| by-tag | 120 ms | 110.8 | seq scans on `anime_tag`, `anime`, `tag` |
+| by-type | 2 | 141 ms | 0.8 KiB | 24.6 |
+| by-season | 2 | 147 ms | 0.5 KiB | 26.5 |
+| by-tag | 2 | 208 ms | 10.2 KiB | **110.8** |
 | by-tag, TV 2015 to 2025 | 54 ms | 27.4 | bitmap scan on `ix_anime_type_year` |
 | by-studio | 101 ms | 27.5 + 39.8 | seq scans on `anime_studio`, `anime`, `studio` |
 
@@ -517,38 +517,22 @@ No index was added for favorites or newest, which were not measured. Write cost 
 
 **Still to do:** re-measure on RDS after the migrations are applied (the migrate job runs when this merges), and fill in the real-table numbers for the list and search rows above.
 
-### Release status and several-value filters (same day)
+### The release-status filter, built and removed (same day)
 
-The list can now filter by whether an anime is really releasing episodes. MAL's status says "Currently Airing" for a show on a long break, so `release_status` looks at the air dates of the episodes: `releasing` = an episode aired in the last 10 days (an episode dated in the future is a schedule and does not count), `on_break` = airing, has released episodes, none in that window, `no_episode_data` = airing with no episode rows. Data on RDS on 18 Nov 2026: **271 airing anime, of which only 111 have any episode rows** (160 have none, so `no_episode_data`); **23 released an episode in the last 10 days**, 87 are on a break (One Piece's last episode, 1180, aired on 27 Sep), and 37 had one in the last 15 days. 112,257 episodes, 16,383 of them with no air date, 7 dated in the future.
+A `release_status` filter (`releasing` = an episode in the last 10 days, `on_break` = airing with episodes but none in that window, `no_episode_data`), with `sort=latest_episode`, a `last_episode_aired` field and an index `ix_episode_aired`, was built, measured, and then **removed**. The reason is that it was derived by us from the `episode` table, not a field MAL provides, and MAL's episode list lags the real broadcasts: **Black Clover 2nd Season** (`mal_id` 61967) holds episodes 1 to 5 (the last dated 31 Oct), although our pipeline fetched its episodes on 15 Nov, after episodes 6 and 7 (7 and 14 Nov) had aired, so MAL did not have them yet. The pipeline itself was fresh: all 111 airing anime that have episode rows were fetched within the last 7 days (86 within 1 to 3 days, 25 within 3 to 7). Only 111 of the 271 airing anime have episode rows at all, and 16,383 of 112,257 episodes have no air date. So a derived "on a break" (87 anime on 18 Nov) includes shows that are simply not registered yet (Black Clover was in that list), and the earlier statement that 87 airing anime were on a break was an overstatement. The only airing signal now is MAL's own `status` (airing, finished, upcoming), which keeps a show on a break as airing. The migration `f6c1e4a9b3d0` was deleted before it was ever applied (RDS stayed at `b3d8f50e6c17`).
 
-Same method as above (RDS, round trip about 16 ms, median of 5 `EXPLAIN ANALYZE` runs, `count + page`), before the `episode (aired)` index:
+What it measured, for the record: the release queries took 28.9 + 27.3 ms (`count + page`) on RDS because they scanned all 112,257 episodes, 0.15 + 0.19 ms with an `episode (aired)` index on a rolled-back temporary copy (1,208 KiB), and sorting all anime by their latest episode took 121.6 ms.
+
+Several-value filters, same method as above (RDS, median of 5 `EXPLAIN ANALYZE` runs, `count + page`):
 
 | Request | Round trip | Database (ms) | Plan |
 |---|---|---|---|
-| list, airing + releasing, by members | 115 ms | 28.9 + 27.3 | seq scan `episode` |
-| list, releasing only (no status), by members | 117 ms | 27.7 + 27.7 | seq scan `episode` |
-| list, airing + on break | 83 ms | 12.5 + 8.7 | seq scan `anime` |
-| list, no episode data | 74 ms | 7.4 + 7.6 | seq scan `anime` |
-| list, airing, by latest episode | 68 ms | 6.4 + 11.6 | |
-| list, all anime, by latest episode | 158 ms | 5.6 + **121.6** | correlated subquery for every anime |
 | list, tags 1 AND 4 (1,140 match) | 88 ms | 13.0 + 14.6 | seq scan `anime_tag` |
-| list, tags 1 OR 4 (11,121 match) | 99 ms | 19.4 + 36.4 | |
-| the latest episode date of the 20 anime on a page | 18 ms | 1.2 | `episode_pkey` |
-
-The `releasing` filter scanned all 112,257 episodes. On rolled-back temporary copies (the baselines on the copies are inflated, 414 ms against 28 ms on the real table, so only the after is compared with the real number):
-
-| Candidate | `releasing` query | After (copy) | Index size | Added? |
-|---|---|---|---|---|
-| `episode (aired)` | 28 ms (real table) | **0.15 + 0.19 ms** | 1,208 KiB (the table's primary key is 2,488 KiB) | **yes** (`ix_episode_aired`) |
-| `episode (anime_id, aired)` | 28 ms (real table) | 2.6 + 2.6 ms | 3,064 KiB | no |
-
-Sorting **all** anime by their latest episode (121.6 ms) is not helped by either index (the copy went 3,170 ms to 3,168 ms with `(aired)` and to 1,700 ms with `(anime_id, aired)`); the sort is only meant to be used with a filter such as `status=airing` (6.4 + 11.6 ms), so it is documented as such and no index was added for it. Write cost of `ix_episode_aired` was not measured: `episode` is written only by the weekly and manual refreshes.
-
-`alembic upgrade head`, `alembic check` and the new migration `f6c1e4a9b3d0` passed on a throwaway local Postgres, which was dropped afterwards.
+| list, tags 1 OR 4 (11,121 match) | 99 ms | 19.4 + 36.4 | seq scan `anime_tag` |
 
 ### A `released_days` filter, built and removed, and the filter options (same day)
 
-A `released_days=N` filter (released an episode in the last N calendar days, for a Sunday "this week's releases" view) was built and measured, then **removed** at the owner's decision: `release_status=releasing` (an episode in the last 10 days) is enough, and the weekly and seasonal episode charts were dropped because MAL's episode data is too patchy for them (episode rows exist for only 5,880 of 23,086 anime, 160 of the 271 airing anime have none, 16,383 of 112,257 episodes have no air date, and One Piece's episode response alone is 1,343 KiB). What it measured, which still applies to `release_status=releasing`, since both are an `EXISTS` on `episode.aired`: on RDS on Wed 18 Nov 2026 it returned 20 anime for 7 days and 35 for 14 (the same 20 as a direct SQL count), and on rolled-back temporary copies with `ix_episode_aired` the query took **0.13 + 0.35 ms** for 7 days and 0.33 + 0.39 ms for 30 days (`count + page`), against about 28 ms per statement without the index on the real table (the temporary copy's own no-index baseline, 403 ms, is inflated and not comparable). `ix_episode_aired` is 1,208 KiB and stays for `releasing`.
+A `released_days=N` filter (released an episode in the last N calendar days, for a Sunday "this week's releases" view) was built and then removed together with the release-status filter, for the reason above. On RDS on Wed 18 Nov 2026 it returned 20 anime for 7 days and 35 for 14.
 
 The two endpoints that fill the filter controls, `GET /filters` (every tag with its anime count, the year range and the fixed choices) and `GET /studios` (search and paginate), measured with the same method before any new index:
 
@@ -571,47 +555,46 @@ Both are cheap, so no Redis cache was added: `/filters` is the same for everyone
 
 | Request | Statements | From the laptop | Size | Database (ms), before the new indexes |
 |---|---|---|---|---|
-| list, default (20 anime) | 4 | 174 ms | 9.3 KiB | count 5.7 + page 18.5 |
-| list, 100 anime | 4 | 182 ms | 47.6 KiB | not measured separately |
-| list, airing + releasing, by members | 4 | 215 ms | 10.9 KiB | 28.9 + 27.3 |
-| list, fall 2025, by score | 4 | 155 ms | 9.8 KiB | not measured separately |
-| list, tag 1 (Action), by score | 4 | 196 ms | 9.8 KiB | 15.3 + 16.9 |
-| list, search "titan" | 4 | 265 ms | 10.2 KiB | 105.8 + 106.1 (51.8 + 52.0 with the combined-text query, no index; 0.8 + 0.8 with the trigram index, on local Postgres) |
-| list, sort by title | 4 | 193 ms | 8.8 KiB | 5.7 + 36.3 |
-| `/filters` | 4 | 175 ms | 6.0 KiB | tags 31.3 + year range 9.1 |
-| `/studios` (20) | 3 | 147 ms | 1.1 KiB | 8.7 + 9.1 |
+| list, default (20 anime) | 3 | 157 ms | 8.5 KiB | count 5.7 + page 18.5 |
+| list, 100 anime | 3 | 169 ms | 43.4 KiB | not measured separately |
+| list, airing, by members | 3 | 153 ms | 9.8 KiB | 6.4 + 7.3 |
+| list, fall 2025, by score | 3 | 140 ms | 9.1 KiB | not measured separately |
+| list, tag 1 (Action), by score | 3 | 173 ms | 9.0 KiB | 15.3 + 16.9 |
+| list, search "titan" | 3 | 245 ms | 9.5 KiB | 105.8 + 106.1 (51.8 + 52.0 with the combined-text query, no index; 0.8 + 0.8 with the trigram index, on local Postgres) |
+| list, sort by title | 3 | 177 ms | 8.2 KiB | 5.7 + 36.3 |
+| `/filters` | 4 | 175 ms | 5.5 KiB | tags 31.3 + year range 9.1 |
+| `/studios` (20) | 3 | 146 ms | 1.1 KiB | 8.7 + 9.1 |
 | by-year | 2 | 141 ms | 11.7 KiB | 22.9 |
-| by-type | 2 | 144 ms | 0.8 KiB | 24.6 |
-| by-season | 2 | 139 ms | 0.5 KiB | 26.5 |
-| by-tag | 2 | 219 ms | 10.2 KiB | **110.8** |
-| by-studio (20) | 3 | 191 ms | 2.8 KiB | 27.5 + 39.8 |
-| anime statistics, Steins;Gate | 5 | 187 ms | **123.8 KiB** | about 35 in all (section 7), the cohort query 3.5 to 8.6 |
-| anime statistics, One Piece | 5 | 280 ms | 3.6 KiB (no reviews stored) | cohort query **105.1** |
-| anime episodes, Steins;Gate | 2 | 125 ms | 30.9 KiB | a primary-key read |
-| anime episodes, One Piece | 2 | 195 ms | **1,343 KiB** | a primary-key read |
+| by-type | 2 | 141 ms | 0.8 KiB | 24.6 |
+| by-season | 2 | 147 ms | 0.5 KiB | 26.5 |
+| by-tag | 2 | 208 ms | 10.2 KiB | **110.8** |
+| by-studio (20) | 3 | 190 ms | 2.8 KiB | 27.5 + 39.8 |
+| anime statistics, Steins;Gate | 5 | 186 ms | **123.8 KiB** | about 35 in all (section 7), the cohort query 3.5 to 8.6 |
+| anime statistics, One Piece | 5 | 275 ms | 3.6 KiB (no reviews stored) | cohort query **105.1** |
+| anime episodes, Steins;Gate | 2 | 120 ms | 30.9 KiB | a primary-key read |
+| anime episodes, One Piece | 2 | 188 ms | **1,343 KiB** | a primary-key read |
 
 Sizes over a random sample: the per-anime statistics response is **avg 11.0 KiB, median 3.0, p95 52.5, max 88.5** (60 anime), the episodes response **avg 12.9, median 7.7, p95 29.5, max 110.4** (40 anime with episodes). The statistics size is almost all reviews (up to 20 full texts).
 
 **Inefficiencies known and not fixed.** The queries are not as fast as they could be. What is left, and what it would take:
 1. **Sorting the whole catalogue by title takes 36 ms** (a scan and sort). Only an expression index would fix it, which was left out to avoid another expression index in the models.
-2. **`sort=latest_episode` over all anime takes 121.6 ms** (a correlated subquery for every anime); it is fast only with a filter such as `status=airing` (6.4 + 11.6 ms). It is documented as such, not limited.
-3. **by-tag takes 110.8 ms** and by-year, by-type and by-season 23 to 27 ms: they aggregate 23,086 anime (68,081 tag links for by-tag) on every call. An index does not help a full aggregation.
-4. **by-studio and `/studios` run the grouped query twice** (once to count, once for the page): 27.5 + 39.8 ms and 8.7 + 9.1 ms. Counting with a window function in the same query would roughly halve it (an estimate, not measured).
-5. **Statements per request**: every list runs 4 (`SET LOCAL statement_timeout`, count, page, the latest episode dates of the page), and `/filters` runs 4 because each of its two reads sets its own timeout. From a laptop each costs 16 ms; inside the VPC about 1 ms. The timeout could be set once per request.
-6. **Deep offset pages**: offset 10,000 on the default list took 5.6 + 39.6 ms, against 5.7 + 18.5 ms for the first page.
-7. **The per-anime statistics response has no cap on reviews** (123.8 KiB for Steins;Gate), and its cohort query takes 105 ms for a long runner (One Piece's cohort is 7,080 anime).
-8. **Big tags are scanned**: a list filtered by Action (20% of the table) reads all of `anime_tag` (15.3 + 16.9 ms); an `anime_tag (tag_id)` index did not help on a temporary copy, so none was added.
-9. **A one-letter search** takes about 30 ms (5,058 matches) even with the trigram index.
-10. **The new indexes are not yet measured on the real RDS tables**, and the write cost of none of them was measured (the tables are written only by the weekly and manual refreshes).
+2. **by-tag takes 110.8 ms** and by-year, by-type and by-season 23 to 27 ms: they aggregate 23,086 anime (68,081 tag links for by-tag) on every call. An index does not help a full aggregation.
+3. **by-studio and `/studios` run the grouped query twice** (once to count, once for the page): 27.5 + 39.8 ms and 8.7 + 9.1 ms. Counting with a window function in the same query would roughly halve it (an estimate, not measured).
+4. **Statements per request**: every list runs 3 (`SET LOCAL statement_timeout`, count, page), and `/filters` runs 4 because each of its two reads sets its own timeout. From a laptop each costs 16 ms; inside the VPC about 1 ms. The timeout could be set once per request.
+5. **Deep offset pages**: offset 10,000 on the default list took 5.6 + 39.6 ms, against 5.7 + 18.5 ms for the first page.
+6. **The per-anime statistics response has no cap on reviews** (123.8 KiB for Steins;Gate), and its cohort query takes 105 ms for a long runner (One Piece's cohort is 7,080 anime).
+7. **Big tags are scanned**: a list filtered by Action (20% of the table) reads all of `anime_tag` (15.3 + 16.9 ms); an `anime_tag (tag_id)` index did not help on a temporary copy, so none was added.
+8. **A one-letter search** takes about 30 ms (5,058 matches) even with the trigram index.
+9. **The new indexes are not yet measured on the real RDS tables**, and the write cost of none of them was measured (the tables are written only by the weekly and manual refreshes).
 
-**What to cache in Redis (#55).** Nothing here is per user and all of it changes only when the catalogue refreshes (weekly for airing anime, monthly for the rest), so a TTL of an hour is safe, except that `release_status=releasing` moves with the calendar. Redis runs with `noeviction`, so every cached key family needs a bounded key space and a size cap.
+**What to cache in Redis (#55).** Nothing here is per user and all of it changes only when the catalogue refreshes (weekly for airing anime, monthly for the rest), so a TTL of an hour is safe. Redis runs with `noeviction`, so every cached key family needs a bounded key space and a size cap.
 
 | Candidate | Why | Key space | Verdict |
 |---|---|---|---|
 | `/filters`, the default `/studios` page, by-type, by-season, by-year (no filters) | the same for everyone, 23 to 31 ms of aggregation or scanning | one key each | **cache** (`/filters` is already sent with `Cache-Control: public, max-age=3600`) |
 | by-tag and by-studio, no year range | the most expensive (110.8 ms; 67 ms) | a few keys (type x sort x order) | **cache** |
 | by-tag, by-studio, by-year with `year_from`/`year_to` | the same cost | thousands of combinations | **do not cache**, or only cache the ranges the frontend offers |
-| list, default and the frontend's own presets (top by members, top by score, airing + releasing, a season) | the first page is 20 ms to 56 ms before the indexes | a handful of keys | **cache**, TTL at most an hour |
+| list, default and the frontend's own presets (top by members, top by score, airing, a season) | the first page is 20 ms to 56 ms before the indexes | a handful of keys | **cache**, TTL at most an hour |
 | list with any other filter, sort or offset | already cheap with the indexes, and the key space is unbounded | huge | **do not cache** |
 | search | about 1 ms with the trigram index, and every keystroke is a new key | unbounded | **do not cache** |
 | per-anime statistics | 35 ms, up to 105 ms for a long runner | one key per anime | **cache the popular ones only**: about 11 KiB on average, so 1,000 anime is about 11 MB, and all 23,086 about 250 MB (estimates from the sample), too much for a `noeviction` Redis |

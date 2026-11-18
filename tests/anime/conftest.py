@@ -46,7 +46,6 @@ def make_row():
 def mock_read_repository(mocker):
     repository = mocker.create_autospec(CatalogueReadRepository, instance=True)
     repository.search_anime.return_value = ([], 0)
-    repository.last_episode_dates.return_value = {}
     repository.list_tags.return_value = []
     repository.year_range.return_value = (None, None)
     repository.list_studios.return_value = ([], 0)
@@ -90,7 +89,6 @@ def all_none_args(**overrides):
         "tag_id": None,
         "tag_match": TagMatch.ALL,
         "studio_id": None,
-        "release_status": None,
         "min_score": None,
         "min_ratings": None,
         "sort": None,

@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 import pytest
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
@@ -10,7 +8,6 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     TagMatch,
 )
 from app.catalogue.read_repository import AnimeFilters
@@ -146,37 +143,6 @@ class TestSeveralValues:
         assert sent_filters(mock_read_repository).tag_match_all is False
 
 
-class TestReleaseStatus:
-    @pytest.mark.parametrize("release_status", list(ReleaseStatus))
-    async def test_the_release_status_is_passed_on(
-        self, anime_list_service, mock_read_repository, release_status
-    ):
-        await anime_list_service.list_anime(**all_none_args(release_status=release_status))
-
-        assert sent_filters(mock_read_repository).release_status is release_status
-
-    async def test_without_it_the_filter_is_off(self, anime_list_service, mock_read_repository):
-        await anime_list_service.list_anime(**all_none_args())
-
-        assert sent_filters(mock_read_repository).release_status is None
-
-    async def test_the_latest_episode_sort_is_accepted(
-        self, anime_list_service, mock_read_repository
-    ):
-        await anime_list_service.list_anime(**all_none_args(sort=AnimeSort.LATEST_EPISODE))
-
-        assert mock_read_repository.search_anime.call_args.args[1] == AnimeSort.LATEST_EPISODE
-
-    async def test_the_filter_is_logged_by_name_only(self, anime_list_service):
-        with capture_logs() as logs:
-            await anime_list_service.list_anime(
-                **all_none_args(release_status=ReleaseStatus.ON_BREAK)
-            )
-
-        served = [e for e in logs if e["event"] == "anime_list_served"]
-        assert served[0]["release_status"] == "on_break"
-
-
 class TestSortingAndPaging:
     async def test_default_sort_is_members_without_a_search(
         self, anime_list_service, mock_read_repository
@@ -251,19 +217,6 @@ class TestResponse:
         assert result.items[1].mal_score is None
         assert (result.total, result.limit, result.offset) == (57, 2, 4)
 
-    async def test_each_item_gets_the_date_of_its_latest_episode(
-        self, anime_list_service, mock_read_repository, make_row
-    ):
-        aired = datetime(2026, 11, 13, tzinfo=UTC)
-        mock_read_repository.search_anime.return_value = ([make_row(1, "A"), make_row(2, "B")], 2)
-        mock_read_repository.last_episode_dates.return_value = {1: aired}
-
-        result = await anime_list_service.list_anime(**all_none_args())
-
-        assert result.items[0].last_episode_aired == aired
-        assert result.items[1].last_episode_aired is None  # no episodes held for it
-        mock_read_repository.last_episode_dates.assert_awaited_once_with([1, 2])
-
     async def test_no_matches_is_an_empty_page_not_an_error(
         self, anime_list_service, mock_read_repository
     ):
@@ -271,7 +224,6 @@ class TestResponse:
 
         assert result.items == []
         assert result.total == 0
-        mock_read_repository.last_episode_dates.assert_awaited_once_with([])
 
     async def test_the_search_text_is_never_logged(self, anime_list_service):
         with capture_logs() as logs:
@@ -293,17 +245,6 @@ class TestTimeout:
             await anime_list_service.list_anime(**all_none_args())
 
         assert [e["event"] for e in logs].count("statement_timeout") == 1
-
-    async def test_a_timeout_while_reading_the_episode_dates_is_a_503_too(
-        self, anime_list_service, mock_read_repository, make_row
-    ):
-        mock_read_repository.search_anime.return_value = ([make_row(1)], 1)
-        mock_read_repository.last_episode_dates.side_effect = DBAPIError(
-            "SELECT", {}, _PgError("57014")
-        )
-
-        with pytest.raises(ServiceUnavailableError):
-            await anime_list_service.list_anime(**all_none_args())
 
     async def test_any_other_database_error_is_not_swallowed(
         self, anime_list_service, mock_read_repository

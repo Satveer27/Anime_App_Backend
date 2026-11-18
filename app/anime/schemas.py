@@ -20,10 +20,6 @@ class AnimeListItemSchema(BaseModel):
     year: int | None = None
     episodes: int | None = None
     aired_from: datetime | None = None
-    last_episode_aired: datetime | None = Field(
-        default=None,
-        description="When its latest released episode aired; null if we hold no episodes for it",
-    )
     mal_score: float | None = Field(default=None, description="MAL score, 0-10")
     scored_by_mal: int | None = None
     members_mal: int | None = None

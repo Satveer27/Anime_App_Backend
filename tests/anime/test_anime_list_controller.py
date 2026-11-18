@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 import pytest
 
 from app.anime.schemas import AnimeListItemSchema, AnimeListResponse
@@ -9,7 +7,6 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     TagMatch,
 )
 from app.exceptions import BadRequestError, ServiceUnavailableError
@@ -69,7 +66,6 @@ class TestListAnimeEndpoint:
         assert kwargs["tag_id"] == [3]
         assert kwargs["studio_id"] == [4]
         assert kwargs["tag_match"] == TagMatch.ALL
-        assert kwargs["release_status"] is None
         assert kwargs["min_score"] == 7.5
         assert kwargs["min_ratings"] == 500
         assert kwargs["sort"] == AnimeSort.SCORE
@@ -90,50 +86,6 @@ class TestListAnimeEndpoint:
         assert kwargs["season"] == [AnimeSeason.FALL, AnimeSeason.WINTER]
         assert kwargs["tag_id"] == [1, 4]
         assert kwargs["studio_id"] == [7, 8]
-
-    def test_tag_match_and_release_status_are_parsed(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        client.get(URL + "?tag_id=1&tag_id=2&tag_match=any&release_status=on_break")
-
-        kwargs = fake_anime_list_service.list_anime.call_args.kwargs
-        assert kwargs["tag_match"] == TagMatch.ANY
-        assert kwargs["release_status"] == ReleaseStatus.ON_BREAK
-
-    def test_the_top_releasing_airing_query_is_accepted(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        response = client.get(URL + "?status=airing&release_status=releasing&sort=members&limit=20")
-
-        assert response.status_code == 200
-        assert fake_anime_list_service.list_anime.call_args.kwargs["release_status"] == (
-            ReleaseStatus.RELEASING
-        )
-
-    def test_the_latest_episode_sort_is_accepted(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response()
-
-        response = client.get(URL + "?sort=latest_episode")
-
-        assert response.status_code == 200
-        assert fake_anime_list_service.list_anime.call_args.kwargs["sort"] == (
-            AnimeSort.LATEST_EPISODE
-        )
-
-    def test_the_item_shows_when_its_latest_episode_aired(self, client, fake_anime_list_service):
-        fake_anime_list_service.list_anime.return_value = make_response(
-            items=[
-                AnimeListItemSchema(
-                    mal_id=1,
-                    title="A",
-                    last_episode_aired=datetime(2026, 11, 13, tzinfo=UTC),
-                )
-            ]
-        )
-
-        body = client.get(URL).json()
-
-        assert body["items"][0]["last_episode_aired"].startswith("2026-11-13")
 
     def test_ten_values_of_a_filter_are_allowed_and_eleven_are_not(
         self, client, fake_anime_list_service
@@ -188,7 +140,6 @@ class TestListAnimeEndpoint:
             "tag_id=abc",
             "studio_id=-3",
             "tag_match=either",
-            "release_status=paused",
             "status=airing&status=live",
             "min_score=10.5",
             "min_score=-1",

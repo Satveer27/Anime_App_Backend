@@ -13,10 +13,8 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     TagMatch,
 )
-from app.catalogue.read_repository import RELEASING_WITHIN_DAYS
 
 anime_router = APIRouter(prefix="/anime", tags=["anime"])
 
@@ -30,19 +28,21 @@ PositiveId = Annotated[int, Field(ge=1, le=10_000_000)]
     summary="Search, filter and sort anime",
     description=(
         "Search by title (the start of the title or of any word in it, also in the English and "
-        "Japanese titles) and filter by type, status, season, year, tag, studio, release status, "
-        "score and number of ratings. All filters are optional and combine with AND. "
+        "Japanese titles) and filter by type, status, season, year, tag, studio, score and "
+        "number of ratings. All filters are optional and combine with AND. "
         "`type`, `status`, `season`, `tag_id` and `studio_id` can be repeated "
         f"(up to {MAX_FILTER_VALUES}, e.g. `status=airing&status=upcoming`): an anime matching "
         "any of the values is kept, except tags, which must all match unless `tag_match=any`. "
-        "`release_status` looks at episode air dates: `releasing` = an episode aired in the last "
-        f"{RELEASING_WITHIN_DAYS} days, `on_break` = airing with episodes but none in that window, "
-        "`no_episode_data` = airing but we hold no episodes. "
-        "`sort`: members, score, favorites, newest, latest_episode, title, or relevance "
-        "(needs `q`). Defaults to relevance with `q` and members without it; missing values sort "
-        "last. For the top airing anime that are really releasing: "
-        "`status=airing&release_status=releasing&sort=members`. For the best anime of a season: "
-        "`season=fall&year=2026&sort=score&min_ratings=500`."
+        "`status` is MAL's own airing status (airing, finished or upcoming): MAL keeps a show "
+        "that is on a break as airing. "
+        "`sort`: members, score, favorites, newest, title, or relevance (needs `q`). Defaults to "
+        "relevance with `q` and members without it; missing values sort last. For the best "
+        "anime of a season: `season=fall&year=2026&sort=score&min_ratings=500`. For the top "
+        "anime airing now that started this year: `status=airing&year=2026&sort=members` "
+        "(`year_from=2025` also takes the shows that started late last year). `season` and "
+        "`year` are the season the anime premiered in, so a long runner that premiered years "
+        "ago, such as One Piece, is left out; a recent show on a break would still appear, "
+        "because MAL keeps it as airing."
     ),
 )
 async def list_anime(
@@ -58,7 +58,6 @@ async def list_anime(
     tag_id: list[PositiveId] | None = Query(None, max_length=MAX_FILTER_VALUES),
     tag_match: TagMatch = Query(TagMatch.ALL, description="With several tags: all or any"),
     studio_id: list[PositiveId] | None = Query(None, max_length=MAX_FILTER_VALUES),
-    release_status: ReleaseStatus | None = Query(None),
     min_score: float | None = Query(None, ge=0, le=10),
     min_ratings: int | None = Query(None, ge=0, description="Minimum number of MAL ratings"),
     sort: AnimeSort | None = Query(None),
@@ -78,7 +77,6 @@ async def list_anime(
         tag_id=tag_id,
         tag_match=tag_match,
         studio_id=studio_id,
-        release_status=release_status,
         min_score=min_score,
         min_ratings=min_ratings,
         sort=sort,

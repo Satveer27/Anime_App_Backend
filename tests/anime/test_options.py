@@ -19,7 +19,6 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     StudioSort,
     TagMatch,
 )
@@ -53,7 +52,6 @@ class TestFixedOptions:
 
         assert values(options["statuses"]) == [s.value for s in AnimeStatus]
         assert values(options["seasons"]) == [s.value for s in AnimeSeason]
-        assert values(options["release_statuses"]) == [r.value for r in ReleaseStatus]
         assert values(options["sorts"]) == [s.value for s in AnimeSort]
         assert set(values(options["orders"])) == {o.value for o in Order}
         assert set(values(options["tag_matches"])) == {m.value for m in TagMatch}
@@ -67,8 +65,6 @@ class TestFixedOptions:
             AnimeStatus(value)
         for value in values(options["seasons"]):
             AnimeSeason(value)
-        for value in values(options["release_statuses"]):
-            ReleaseStatus(value)
         for value in values(options["sorts"]):
             AnimeSort(value)
 
@@ -84,18 +80,10 @@ class TestFixedOptions:
     def test_seasons_are_in_calendar_order(self):
         assert values(fixed_options()["seasons"]) == ["winter", "spring", "summer", "fall"]
 
-    def test_release_statuses_say_what_they_mean(self):
-        described = {o.value: o.description for o in fixed_options()["release_statuses"]}
-
-        assert "10 days" in described["releasing"]
-        assert "10 days" in described["on_break"]
-        assert described["no_episode_data"]
-
     def test_the_sorts_that_need_care_say_so(self):
         described = {o.value: o.description for o in fixed_options()["sorts"]}
 
         assert "search text" in described["relevance"]
-        assert "status=airing" in described["latest_episode"]
 
 
 class TestFilterOptions:
@@ -193,7 +181,6 @@ def options_response() -> FilterOptionsResponse:
         types=[option],
         statuses=[option],
         seasons=[option],
-        release_statuses=[option],
         sorts=[option],
         orders=[option],
         tag_matches=[option],

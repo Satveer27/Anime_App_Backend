@@ -1,20 +1,17 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import Text, and_, case, exists, func, literal_column, or_, select, text
+from sqlalchemy import Text, and_, case, func, literal_column, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.catalogue.enums import AnimeSort, GroupSort, Order, ReleaseStatus, StudioSort
+from app.catalogue.enums import AnimeSort, GroupSort, Order, StudioSort
 from app.catalogue.models import (
     SEARCH_TEXT_SQL,
-    STATUS_AIRING,
     Anime,
     AnimeStudio,
     AnimeTag,
-    Episode,
     Studio,
     Tag,
 )
@@ -26,10 +23,6 @@ logger = structlog.get_logger()
 # cancelled by Postgres and the caller answers 503 (see `is_statement_timeout`).
 STATEMENT_TIMEOUT_MS = 5000
 STATEMENT_TIMEOUT_SQLSTATE = "57014"  # Postgres: query_canceled
-
-# `release_status=releasing` means an episode aired in this many days. A weekly show is never
-# silent for longer than a week, and the extra days absorb a slipped broadcast.
-RELEASING_WITHIN_DAYS = 10
 
 LIKE_ESCAPE = "\\"
 SEASON_ORDER = {"winter": 0, "spring": 1, "summer": 2, "fall": 3}
@@ -88,7 +81,6 @@ class AnimeFilters:
     tag_ids: tuple[int, ...] = ()
     tag_match_all: bool = True
     studio_ids: tuple[int, ...] = ()
-    release_status: ReleaseStatus | None = None
     min_score: float | None = None
     min_ratings: int | None = None
 
@@ -136,36 +128,6 @@ class CatalogueReadRepository:
         titles = (Anime.title, Anime.title_english, Anime.title_japanese)
         return or_(*(t.ilike(prefix, escape=LIKE_ESCAPE) for t in titles))
 
-    @staticmethod
-    def _release_condition(release_status: ReleaseStatus):
-        """Judge whether an anime is putting episodes out from the air dates of its episodes.
-
-        An episode dated in the future is a schedule, not a release, so only `aired <= now`
-        counts.
-        """
-        released = Episode.anime_id == Anime.mal_id, Episode.aired <= func.now()
-        recent = exists().where(
-            *released, Episode.aired >= func.now() - timedelta(days=RELEASING_WITHIN_DAYS)
-        )
-        if release_status is ReleaseStatus.RELEASING:
-            return recent
-        any_released = exists().where(*released)
-        airing = Anime.status == STATUS_AIRING
-        if release_status is ReleaseStatus.ON_BREAK:
-            return and_(airing, any_released, ~recent)
-        any_episode = exists().where(Episode.anime_id == Anime.mal_id)
-        return and_(airing, ~any_episode)
-
-    @staticmethod
-    def _latest_episode_aired():
-        """When the anime's most recent released episode aired (a correlated subquery)."""
-        return (
-            select(func.max(Episode.aired))
-            .where(Episode.anime_id == Anime.mal_id, Episode.aired <= func.now())
-            .correlate(Anime)
-            .scalar_subquery()
-        )
-
     def _anime_conditions(self, filters: AnimeFilters) -> list:
         conditions = []
         if filters.q:
@@ -198,8 +160,6 @@ class CatalogueReadRepository:
                     )
                 )
             )
-        if filters.release_status is not None:
-            conditions.append(self._release_condition(filters.release_status))
         if filters.min_score is not None:
             conditions.append(Anime.mal_score >= filters.min_score)
         if filters.min_ratings is not None:
@@ -217,7 +177,6 @@ class CatalogueReadRepository:
             AnimeSort.SCORE: (Anime.mal_score, True),
             AnimeSort.FAVORITES: (Anime.favorites_mal, True),
             AnimeSort.NEWEST: (Anime.aired_from, True),
-            AnimeSort.LATEST_EPISODE: (self._latest_episode_aired(), True),
             AnimeSort.TITLE: (func.lower(Anime.title), False),
         }[sort]
         descending = descending_by_default if order is None else order is Order.DESC
@@ -268,17 +227,6 @@ class CatalogueReadRepository:
             )
         ).all()
         return list(rows), total
-
-    async def last_episode_dates(self, anime_ids: list[int]) -> dict[int, datetime]:
-        """When each of these anime last released an episode (only those that have released one)."""
-        if not anime_ids:
-            return {}
-        rows = await self.db.execute(
-            select(Episode.anime_id, func.max(Episode.aired))
-            .where(Episode.anime_id.in_(anime_ids), Episode.aired <= func.now())
-            .group_by(Episode.anime_id)
-        )
-        return {anime_id: aired for anime_id, aired in rows.all() if aired is not None}
 
     # --- options for the frontend's filter controls --------------------------------------
 

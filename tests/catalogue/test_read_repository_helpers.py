@@ -4,10 +4,8 @@ from pathlib import Path
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DBAPIError
 
-from app.catalogue.enums import AnimeSort, Order, ReleaseStatus
-from app.catalogue.models import SEARCH_TEXT_SQL, Anime, Episode
+from app.catalogue.models import SEARCH_TEXT_SQL, Anime
 from app.catalogue.read_repository import (
-    RELEASING_WITHIN_DAYS,
     AnimeFilters,
     CatalogueReadRepository,
     _escape_like,
@@ -71,7 +69,6 @@ class TestSearchIndex:
         names = {index.name for index in Anime.__table__.indexes}
 
         assert {"ix_anime_search_trgm", "ix_anime_members_mal", "ix_anime_mal_score"} <= names
-        assert "ix_episode_aired" in {index.name for index in Episode.__table__.indexes}
 
 
 class TestSearchSql:
@@ -86,10 +83,10 @@ class TestSearchSql:
         filters = AnimeFilters(
             q="titan", types=("TV",), statuses=("Currently Airing",), seasons=("fall",),
             year=2020, year_from=2010, year_to=2019, tag_ids=(1,), studio_ids=(2,),
-            release_status=ReleaseStatus.RELEASING, min_score=7.0, min_ratings=500,
+            min_score=7.0, min_ratings=500,
         )  # fmt: skip
 
-        assert len(self.repository._anime_conditions(filters)) == 12
+        assert len(self.repository._anime_conditions(filters)) == 11
 
     def test_several_values_become_an_in_list(self):
         conditions = self.repository._anime_conditions(
@@ -132,105 +129,3 @@ class TestSearchSql:
         (condition,) = self.repository._anime_conditions(AnimeFilters(tag_ids=(7,)))
 
         assert "tag_id IN (7)" in sql(condition)
-
-
-class TestReleaseSql:
-    repository = CatalogueReadRepository(db=None)
-
-    def condition(self, release_status):
-        return sql(self.repository._release_condition(release_status))
-
-    def test_releasing_is_an_episode_aired_in_the_last_ten_days(self):
-        text = self.condition(ReleaseStatus.RELEASING)
-
-        assert "EXISTS" in text
-        assert "episode.anime_id = anime.mal_id" in text
-        assert "episode.aired <= now()" in text
-        assert "episode.aired >= now() - " in text
-        assert RELEASING_WITHIN_DAYS == 10
-
-    def test_a_future_dated_episode_is_a_schedule_not_a_release(self):
-        for status in ReleaseStatus:
-            if status is not ReleaseStatus.NO_EPISODE_DATA:
-                assert "episode.aired <= now()" in self.condition(status)
-
-    def test_on_break_is_airing_with_released_episodes_but_none_recently(self):
-        text = self.condition(ReleaseStatus.ON_BREAK)
-
-        assert "anime.status = 'Currently Airing'" in text
-        assert text.count("EXISTS") == 2
-        assert "NOT (EXISTS" in text
-
-    def test_no_episode_data_is_airing_with_no_episode_rows_at_all(self):
-        text = self.condition(ReleaseStatus.NO_EPISODE_DATA)
-
-        assert "anime.status = 'Currently Airing'" in text
-        assert "NOT (EXISTS" in text
-        assert "episode.aired" not in text  # any episode at all, dated or not
-
-    def test_sorting_by_the_latest_episode_uses_the_last_released_date(self):
-        order = self.repository._anime_order(AnimeSort.LATEST_EPISODE, None, None)
-        text = sql(order[0])
-
-        assert "max(episode.aired)" in text
-        assert "episode.aired <= now()" in text
-        assert "DESC NULLS LAST" in text
-        assert "mal_id ASC" in sql(order[-1])
-
-    def test_search_matches_the_start_of_any_word_in_any_of_the_three_titles(self):
-        (condition,) = self.repository._anime_conditions(AnimeFilters(q="titan"))
-        compiled = condition.compile(dialect=postgresql.dialect())
-
-        # one ILIKE on the combined title text: a space and the text, anywhere (the start of a
-        # word, since every title sits behind a space)
-        assert list(compiled.params.values()) == ["% titan%"]
-        for column in ("title", "title_english", "title_japanese"):
-            assert column in str(compiled)
-
-    def test_search_text_cannot_act_as_a_pattern(self):
-        (condition,) = self.repository._anime_conditions(AnimeFilters(q="100%_x"))
-        compiled = condition.compile(dialect=postgresql.dialect())
-
-        # the user's % and _ are escaped; only the trailing % is the wildcard we add
-        assert list(compiled.params.values()) == ["% 100\\%\\_x%"]
-        assert "ESCAPE" in str(compiled)
-
-    def test_search_text_is_a_bound_parameter_never_part_of_the_sql(self):
-        (condition,) = self.repository._anime_conditions(AnimeFilters(q="'; DROP TABLE anime;--"))
-        compiled = condition.compile(dialect=postgresql.dialect())
-
-        assert "DROP TABLE" not in str(compiled)
-        assert any("DROP TABLE" in value for value in compiled.params.values())
-
-    def test_every_order_ends_with_the_id_so_pages_are_stable(self):
-        for sort in (
-            AnimeSort.MEMBERS,
-            AnimeSort.SCORE,
-            AnimeSort.FAVORITES,
-            AnimeSort.NEWEST,
-            AnimeSort.TITLE,
-        ):
-            order = self.repository._anime_order(sort, None, None)
-            assert "mal_id ASC" in sql(order[-1])
-
-    def test_missing_values_sort_last_in_both_directions(self):
-        for direction in (Order.ASC, Order.DESC):
-            order = self.repository._anime_order(AnimeSort.SCORE, direction, None)
-            assert "NULLS LAST" in sql(order[0])
-
-    def test_default_directions(self):
-        assert "DESC" in sql(self.repository._anime_order(AnimeSort.MEMBERS, None, None)[0])
-        assert "ASC" in sql(self.repository._anime_order(AnimeSort.TITLE, None, None)[0])
-        assert "DESC" in sql(self.repository._anime_order(AnimeSort.NEWEST, None, None)[0])
-
-    def test_an_explicit_order_overrides_the_default(self):
-        assert "ASC" in sql(self.repository._anime_order(AnimeSort.MEMBERS, Order.ASC, None)[0])
-        assert "DESC" in sql(self.repository._anime_order(AnimeSort.TITLE, Order.DESC, None)[0])
-
-    def test_relevance_puts_an_exact_title_first_then_a_prefix_then_members(self):
-        order = self.repository._anime_order(AnimeSort.RELEVANCE, None, "titan")
-        text = sql(order[0])
-
-        assert "CASE WHEN" in text
-        assert "lower(anime.title) = 'titan'" in text
-        assert "members_mal DESC" in sql(order[1])

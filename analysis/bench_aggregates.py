@@ -13,7 +13,7 @@ import time
 
 from sqlalchemy import event
 
-from app.catalogue.enums import AnimeSort, GroupSort, Order, ReleaseStatus, StudioSort
+from app.catalogue.enums import AnimeSort, GroupSort, Order, StudioSort
 from app.catalogue.read_repository import AggregateFilters, AnimeFilters, CatalogueReadRepository
 from app.core.database.database import asyncSessionMaker, engine
 
@@ -58,40 +58,11 @@ CASES = {
     "list: search 'zzzz' (no match)": lambda r: r.search_anime(
         AnimeFilters(q="zzzz"), AnimeSort.RELEVANCE, None, 10, 0
     ),
-    "list: airing + releasing, by members": lambda r: r.search_anime(
-        AnimeFilters(statuses=("Currently Airing",), release_status=ReleaseStatus.RELEASING),
-        AnimeSort.MEMBERS,
-        None,
-        20,
-        0,
-    ),
-    "list: releasing only (no status), by members": lambda r: r.search_anime(
-        AnimeFilters(release_status=ReleaseStatus.RELEASING), AnimeSort.MEMBERS, None, 20, 0
-    ),
-    "list: airing + on break, by members": lambda r: r.search_anime(
-        AnimeFilters(statuses=("Currently Airing",), release_status=ReleaseStatus.ON_BREAK),
-        AnimeSort.MEMBERS,
-        None,
-        20,
-        0,
-    ),
-    "list: no episode data": lambda r: r.search_anime(
-        AnimeFilters(release_status=ReleaseStatus.NO_EPISODE_DATA), AnimeSort.MEMBERS, None, 20, 0
-    ),
-    "list: airing, by latest episode": lambda r: r.search_anime(
-        AnimeFilters(statuses=("Currently Airing",)), AnimeSort.LATEST_EPISODE, None, 20, 0
-    ),
-    "list: all anime, by latest episode": lambda r: r.search_anime(
-        AnimeFilters(), AnimeSort.LATEST_EPISODE, None, 20, 0
-    ),
     "list: tags 1 AND 4": lambda r: r.search_anime(
         AnimeFilters(tag_ids=(1, 4)), AnimeSort.MEMBERS, None, 20, 0
     ),
     "list: tags 1 OR 4": lambda r: r.search_anime(
         AnimeFilters(tag_ids=(1, 4), tag_match_all=False), AnimeSort.MEMBERS, None, 20, 0
-    ),
-    "list: last episode dates for 20 anime": lambda r: r.last_episode_dates(
-        list(range(1, 21)) + [21]
     ),
     "options: filters (all 78 tags + year range)": lambda r: r.list_tags(),
     "options: year range": lambda r: r.year_range(),

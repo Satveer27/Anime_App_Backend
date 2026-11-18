@@ -36,7 +36,6 @@ class FilterOptionsResponse(BaseModel):
     types: list[OptionSchema]
     statuses: list[OptionSchema]
     seasons: list[OptionSchema]
-    release_statuses: list[OptionSchema]
     sorts: list[OptionSchema]
     orders: list[OptionSchema]
     tag_matches: list[OptionSchema]

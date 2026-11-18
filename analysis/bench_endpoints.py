@@ -22,8 +22,8 @@ CASES = [
     ("list: default (limit 20)", "/api/v1/anime"),
     ("list: limit 100", "/api/v1/anime?limit=100"),
     (
-        "list: airing + releasing, members",
-        "/api/v1/anime?status=airing&release_status=releasing&sort=members",
+        "list: airing, by members",
+        "/api/v1/anime?status=airing&sort=members",
     ),
     (
         "list: season fall 2025, by score",

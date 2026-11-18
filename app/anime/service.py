@@ -10,7 +10,6 @@ from app.catalogue.enums import (
     AnimeStatus,
     AnimeType,
     Order,
-    ReleaseStatus,
     TagMatch,
 )
 from app.catalogue.read_repository import (
@@ -40,7 +39,6 @@ class AnimeListService:
         tag_id: list[int] | None,
         tag_match: TagMatch,
         studio_id: list[int] | None,
-        release_status: ReleaseStatus | None,
         min_score: float | None,
         min_ratings: int | None,
         sort: AnimeSort | None,
@@ -77,7 +75,6 @@ class AnimeListService:
             tag_ids=tuple(sorted(set(tag_id or ()))),
             tag_match_all=tag_match is TagMatch.ALL,
             studio_ids=tuple(sorted(set(studio_id or ()))),
-            release_status=release_status,
             min_score=min_score,
             min_ratings=min_ratings,
         )
@@ -85,26 +82,19 @@ class AnimeListService:
             rows, total = await self.read_repository.search_anime(
                 filters, sort, order, limit, offset
             )
-            last_aired = await self.read_repository.last_episode_dates([row.mal_id for row in rows])
 
         # The search text is what a person typed, so it is never logged, only that there was one.
         logger.info(
             "anime_list_served",
             has_search=q is not None,
             sort=sort.value,
-            release_status=release_status.value if release_status else None,
             returned=len(rows),
             total=total,
             limit=limit,
             offset=offset,
         )
         return AnimeListResponse(
-            items=[
-                AnimeListItemSchema.model_validate(row).model_copy(
-                    update={"last_episode_aired": last_aired.get(row.mal_id)}
-                )
-                for row in rows
-            ],
+            items=[AnimeListItemSchema.model_validate(row) for row in rows],
             total=total,
             limit=limit,
             offset=offset,
