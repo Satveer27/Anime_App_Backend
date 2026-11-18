@@ -564,3 +564,57 @@ The two endpoints that fill the filter controls, `GET /filters` (every tag with 
 Both are cheap, so no Redis cache was added: `/filters` is the same for everyone and changes only when the catalogue refreshes, so it is sent with `Cache-Control: public, max-age=3600` and the browser or nginx can keep it for an hour. A server-side cache is a #55 decision.
 
 **What this says about caching (#55).** After the indexes the list and search are cheap, but the aggregates are not and need no per-user input: by-tag takes 111 ms in the database and by-studio about 67 ms, by-year, by-type and by-season 23 to 27 ms. They change only when the catalogue refreshes, so they are the best candidates for a per-parameter cache.
+
+## 11. Cache candidates and known inefficiencies (issues #51 to #53), 18 Nov 2026
+
+`analysis/bench_endpoints.py` calls every public endpoint through the real app against RDS (db.t4g.micro, London, from the developer's laptop, round trip about 16 ms per statement): one warm-up, then the median of 5 calls, with the number of SQL statements each call runs and the size of the response. The "Database (ms)" column repeats the `EXPLAIN ANALYZE` execution times from sections 7, 9 and 10, which were measured **before** the new indexes were applied on RDS (they are applied when the migrations run on merge), so "after" figures are still to be taken on RDS. Everything from the laptop is dominated by round trips: a call with 4 statements costs about 4 x 16 ms before any database work.
+
+| Request | Statements | From the laptop | Size | Database (ms), before the new indexes |
+|---|---|---|---|---|
+| list, default (20 anime) | 4 | 174 ms | 9.3 KiB | count 5.7 + page 18.5 |
+| list, 100 anime | 4 | 182 ms | 47.6 KiB | not measured separately |
+| list, airing + releasing, by members | 4 | 215 ms | 10.9 KiB | 28.9 + 27.3 |
+| list, fall 2025, by score | 4 | 155 ms | 9.8 KiB | not measured separately |
+| list, tag 1 (Action), by score | 4 | 196 ms | 9.8 KiB | 15.3 + 16.9 |
+| list, search "titan" | 4 | 265 ms | 10.2 KiB | 105.8 + 106.1 (51.8 + 52.0 with the combined-text query, no index; 0.8 + 0.8 with the trigram index, on local Postgres) |
+| list, sort by title | 4 | 193 ms | 8.8 KiB | 5.7 + 36.3 |
+| `/filters` | 4 | 175 ms | 6.0 KiB | tags 31.3 + year range 9.1 |
+| `/studios` (20) | 3 | 147 ms | 1.1 KiB | 8.7 + 9.1 |
+| by-year | 2 | 141 ms | 11.7 KiB | 22.9 |
+| by-type | 2 | 144 ms | 0.8 KiB | 24.6 |
+| by-season | 2 | 139 ms | 0.5 KiB | 26.5 |
+| by-tag | 2 | 219 ms | 10.2 KiB | **110.8** |
+| by-studio (20) | 3 | 191 ms | 2.8 KiB | 27.5 + 39.8 |
+| anime statistics, Steins;Gate | 5 | 187 ms | **123.8 KiB** | about 35 in all (section 7), the cohort query 3.5 to 8.6 |
+| anime statistics, One Piece | 5 | 280 ms | 3.6 KiB (no reviews stored) | cohort query **105.1** |
+| anime episodes, Steins;Gate | 2 | 125 ms | 30.9 KiB | a primary-key read |
+| anime episodes, One Piece | 2 | 195 ms | **1,343 KiB** | a primary-key read |
+
+Sizes over a random sample: the per-anime statistics response is **avg 11.0 KiB, median 3.0, p95 52.5, max 88.5** (60 anime), the episodes response **avg 12.9, median 7.7, p95 29.5, max 110.4** (40 anime with episodes). The statistics size is almost all reviews (up to 20 full texts).
+
+**Inefficiencies known and not fixed.** The queries are not as fast as they could be. What is left, and what it would take:
+1. **Sorting the whole catalogue by title takes 36 ms** (a scan and sort). Only an expression index would fix it, which was left out to avoid another expression index in the models.
+2. **`sort=latest_episode` over all anime takes 121.6 ms** (a correlated subquery for every anime); it is fast only with a filter such as `status=airing` (6.4 + 11.6 ms). It is documented as such, not limited.
+3. **by-tag takes 110.8 ms** and by-year, by-type and by-season 23 to 27 ms: they aggregate 23,086 anime (68,081 tag links for by-tag) on every call. An index does not help a full aggregation.
+4. **by-studio and `/studios` run the grouped query twice** (once to count, once for the page): 27.5 + 39.8 ms and 8.7 + 9.1 ms. Counting with a window function in the same query would roughly halve it (an estimate, not measured).
+5. **Statements per request**: every list runs 4 (`SET LOCAL statement_timeout`, count, page, the latest episode dates of the page), and `/filters` runs 4 because each of its two reads sets its own timeout. From a laptop each costs 16 ms; inside the VPC about 1 ms. The timeout could be set once per request.
+6. **Deep offset pages**: offset 10,000 on the default list took 5.6 + 39.6 ms, against 5.7 + 18.5 ms for the first page.
+7. **The per-anime statistics response has no cap on reviews** (123.8 KiB for Steins;Gate), and its cohort query takes 105 ms for a long runner (One Piece's cohort is 7,080 anime).
+8. **Big tags are scanned**: a list filtered by Action (20% of the table) reads all of `anime_tag` (15.3 + 16.9 ms); an `anime_tag (tag_id)` index did not help on a temporary copy, so none was added.
+9. **A one-letter search** takes about 30 ms (5,058 matches) even with the trigram index.
+10. **The new indexes are not yet measured on the real RDS tables**, and the write cost of none of them was measured (the tables are written only by the weekly and manual refreshes).
+
+**What to cache in Redis (#55).** Nothing here is per user and all of it changes only when the catalogue refreshes (weekly for airing anime, monthly for the rest), so a TTL of an hour is safe, except that `release_status=releasing` moves with the calendar. Redis runs with `noeviction`, so every cached key family needs a bounded key space and a size cap.
+
+| Candidate | Why | Key space | Verdict |
+|---|---|---|---|
+| `/filters`, the default `/studios` page, by-type, by-season, by-year (no filters) | the same for everyone, 23 to 31 ms of aggregation or scanning | one key each | **cache** (`/filters` is already sent with `Cache-Control: public, max-age=3600`) |
+| by-tag and by-studio, no year range | the most expensive (110.8 ms; 67 ms) | a few keys (type x sort x order) | **cache** |
+| by-tag, by-studio, by-year with `year_from`/`year_to` | the same cost | thousands of combinations | **do not cache**, or only cache the ranges the frontend offers |
+| list, default and the frontend's own presets (top by members, top by score, airing + releasing, a season) | the first page is 20 ms to 56 ms before the indexes | a handful of keys | **cache**, TTL at most an hour |
+| list with any other filter, sort or offset | already cheap with the indexes, and the key space is unbounded | huge | **do not cache** |
+| search | about 1 ms with the trigram index, and every keystroke is a new key | unbounded | **do not cache** |
+| per-anime statistics | 35 ms, up to 105 ms for a long runner | one key per anime | **cache the popular ones only**: about 11 KiB on average, so 1,000 anime is about 11 MB, and all 23,086 about 250 MB (estimates from the sample), too much for a `noeviction` Redis |
+| per-anime episodes | a primary-key read | one key per anime | **do not cache**: One Piece alone is 1.3 MB; if ever cached, compress and skip entries over a size limit |
+
+Re-run `analysis/bench_endpoints.py` and `analysis/bench_aggregates.py` after the migrations are applied on RDS, and again after Redis is in, to compare.

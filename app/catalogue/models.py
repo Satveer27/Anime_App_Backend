@@ -161,9 +161,9 @@ class AnimeRelation(Base):
 
 class Episode(Base):
     __tablename__ = "episode"
-    # "Which anime released an episode in the last 10 days" (the release_status filter) and, next,
-    # the episodes of a week or season. Without it the filter scanned all 112,257 episodes (about
-    # 28 ms); with it 0.15 ms. Measured in METRICS.md section 10 (ADR 0015).
+    # "Which anime released an episode in the last 10 days" (the release_status filter). Without
+    # it the filter scanned all 112,257 episodes (about 28 ms per statement); with it 0.15 ms.
+    # Measured in METRICS.md section 10 (ADR 0015).
     __table_args__ = (Index("ix_episode_aired", "aired"),)
 
     anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), primary_key=True)
