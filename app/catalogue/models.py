@@ -17,6 +17,15 @@ from app.core.database.database import Base
 STATUS_AIRING = "Currently Airing"
 STATUS_NOT_YET_AIRED = "Not yet aired"
 
+# The text a title search runs on: the three titles joined, each behind a space, with an
+# unprintable separator (chr(31)) between them. The trigram index on `anime` is built on exactly
+# this expression, and so must the search query, or the index silently stops being used. The
+# migration that creates the index keeps its own copy (a test checks the two are identical).
+SEARCH_TEXT_SQL = (
+    "(' ' || coalesce(title, '') || ' ' || chr(31) || ' ' || coalesce(title_english, '')"
+    " || ' ' || chr(31) || ' ' || coalesce(title_japanese, ''))"
+)
+
 
 class Anime(Base):
     """One MAL entry. Single-valued fields and name lists; related rows live in child tables."""
@@ -24,7 +33,14 @@ class Anime(Base):
     __tablename__ = "anime"
     # The cohort percentile query filters on (type, year). Measured in METRICS.md section 7
     # (ADR 0015): 11.5 ms down to 2-4 ms.
-    __table_args__ = (Index("ix_anime_type_year", "type", "year"),)
+    __table_args__ = (
+        Index("ix_anime_type_year", "type", "year"),
+        # Title search by the start of any word (needs the pg_trgm extension, created in the
+        # migration). Measured in METRICS.md section 10 (ADR 0015): 105 ms down to 0.3 ms.
+        Index(
+            "ix_anime_search_trgm", text(f"{SEARCH_TEXT_SQL} gin_trgm_ops"), postgresql_using="gin"
+        ),
+    )
 
     mal_id = Column(Integer, primary_key=True, autoincrement=False)  # mal_id
     title = Column(Text, nullable=False)
@@ -62,6 +78,13 @@ class Anime(Base):
     updated_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+# The default anime lists sort by members or score, highest first, with ties by id. Without these
+# the page query read and sorted every row (about 20 ms); with them it reads 20 rows (0.07 ms).
+# Measured in METRICS.md section 10 (ADR 0015).
+Index("ix_anime_members_mal", Anime.members_mal.desc().nulls_last(), Anime.mal_id)
+Index("ix_anime_mal_score", Anime.mal_score.desc().nulls_last(), Anime.mal_id)
 
 
 class Tag(Base):
@@ -138,6 +161,10 @@ class AnimeRelation(Base):
 
 class Episode(Base):
     __tablename__ = "episode"
+    # "Which anime released an episode in the last 10 days" (the release_status filter) and, next,
+    # the episodes of a week or season. Without it the filter scanned all 112,257 episodes (about
+    # 28 ms); with it 0.15 ms. Measured in METRICS.md section 10 (ADR 0015).
+    __table_args__ = (Index("ix_episode_aired", "aired"),)
 
     anime_id = Column(Integer, ForeignKey("anime.mal_id", ondelete="CASCADE"), primary_key=True)
     episode_number = Column(Integer, primary_key=True, autoincrement=False)
