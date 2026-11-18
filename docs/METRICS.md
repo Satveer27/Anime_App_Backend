@@ -626,3 +626,32 @@ An anime counts in a group's score numbers only if it has a score and at least `
 - The votes in the histogram add up to `scored_by_mal` (median ratio 1.000, range 0.946 to 1.001 over 80 anime).
 
 **Not covered by the audit:** the SQL of the new indexes has not been measured on the real RDS tables (the migrations run on merge), there are no real-Postgres tests, and load behaviour is untested (#55).
+
+## 13. Hidden gems and most dropped (issue #54), 18 Nov 2026
+
+`GET /api/v1/statistics/hidden-gems` and `most-dropped`. Thresholds are constants in `app/statistics/list_service.py` and appear in the OpenAPI descriptions: hidden gems need a score in the top 20% and members in the bottom 50% of the anime's type, at least 2,000 ratings, with the percentiles ranked among anime of that type that have at least `min_ratings` ratings (query parameter, default 50); most dropped needs at least `min_members` members (query parameter, default 10,000) and ranks `dropped / (total - plan_to_watch)`.
+
+**Timings and plans on RDS (real catalogue, 23,086 anime), 18 Nov 2026.** `analysis/bench_lists.py` runs the repository queries on a pooled connection (no HTTP), `limit` 20, median of 15 timed runs after one warm-up, and `EXPLAIN (ANALYZE, BUFFERS)` of each statement (median of 5). Each list is two statements, a count and a page, so the database time is shown as `count + page`.
+
+| case | round trip | DB execution | qualifying rows | plan |
+|---|---|---|---|---|
+| hidden-gems, default | 161.9 ms | 54.2 + 58.3 ms | 119 | Seq Scan anime |
+| hidden-gems, `type=tv` | 80.3 ms | 14.8 + 15.8 ms | 113 | Bitmap scan on `ix_anime_type_year` |
+| hidden-gems, `type=movie` | 67.3 ms | 9.0 + 9.4 ms | 0 | `ix_anime_type_year` |
+| hidden-gems, tv 2015 to 2025 | 80.1 ms | 15.7 + 16.2 ms | 31 | `ix_anime_type_year` |
+| hidden-gems, `min_ratings=0` | 166.2 ms | 61.4 + 59.5 ms | 119 | Seq Scan anime |
+| hidden-gems, `min_ratings=500` | 135.8 ms | 42.0 + 46.6 ms | 179 | Seq Scan anime |
+| hidden-gems, page 3 | 162.3 ms | 60.5 + 57.7 ms | 119 | Seq Scan anime |
+| most-dropped, default | 76.3 ms | 14.1 + 19.2 ms | 6,865 | `ix_anime_members_mal`, Seq Scan statistics |
+| most-dropped, `type=tv` | 70.2 ms | 12.2 + 15.4 ms | 3,803 | `ix_anime_type_year` |
+| most-dropped, `type=movie` | 61.8 ms | 7.3 + 8.3 ms | 972 | `ix_anime_type_year`, `ix_anime_members_mal` |
+| most-dropped, tv 2015 to 2025 | 63.6 ms | 8.4 + 10.1 ms | 1,916 | same |
+| most-dropped, `min_members=1000` | 91.4 ms | 20.4 + 29.1 ms | 12,774 | Seq Scan on both tables |
+| most-dropped, `min_members=100000` | 68.6 ms | 8.5 + 10.6 ms | 2,460 | `ix_anime_members_mal` |
+| most-dropped, page 3 | 77.8 ms | 14.1 + 18.9 ms | 6,865 | `ix_anime_members_mal` |
+
+All are far under the 5 s statement timeout, and the slowest (unfiltered hidden gems) ranks every scored anime twice with a window function. **No index was added** (ADR 0015): the existing `ix_anime_type_year` and `ix_anime_members_mal` already serve the filtered cases, and the sequential scans are over 23,086 rows. A possible saving is to fetch the count and the page in one statement (`count(*) OVER ()`), which would roughly halve the unfiltered hidden-gems time, at the cost of an unknown total on an empty last page; not done. A Redis cache for #55 is still to compare.
+
+**Finding: hidden gems return nothing for movies, and few for the other types.** The members rule ("bottom 50% of its type") is ranked among every anime with 50 or more ratings, and most non-TV anime are a long tail of obscure titles. The movie cohort has 3,049 anime with a median of 2,722 members; the 565 movies in the top 20% by score with at least 2,000 ratings all have 4,441 members or more, so none passes. TV works because its median is 39,742 members: of 5,490 TV anime, 1,097 are in the top 20% by score, 120 of those are also in the bottom half by members, and 113 keep 2,000 ratings. Raising `min_ratings` to 500 narrows the cohort to better-known anime and raises the median, which is why it returns 179 instead of 119. Options if this matters: rank the members percentile among anime that already pass the 2,000-rating floor, or replace the percentile with a fixed members cap.
+
+**Tests.** 12 real-Postgres tests (percentiles per type, each floor, filters that narrow without changing the ranking, ties, paging and counts, unaired and never-started anime), plus mock tests for the service and the controller.
