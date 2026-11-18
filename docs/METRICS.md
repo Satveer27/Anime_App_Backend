@@ -608,4 +608,21 @@ An anime counts in a group's score numbers only if it has a score and at least `
 
 ### `min_ratings` is now a query parameter on the five aggregates (18 Nov 2026)
 
-`GET /api/v1/statistics/by-year`, `by-type`, `by-season`, `by-tag` and `by-studio` take `min_ratings` (0 to 100,000, default 50), and each response reports the value used. `by-studio` also keeps its own `min_anime` (the minimum scored anime per studio, default 10). On RDS, `by-type` for TV gives 5,490 scored anime of 8,580 (mean 6.876) at both `min_ratings=0` and 50, and 4,776 (mean 6.997) at 500: MAL publishes a score only once an anime has about 50 ratings, so values below 50 change nothing and raising it is what excludes anime. `by-type` and `by-season` already took `year_from` and `year_to`, so a single year or any range works (for example TV by season in 2025: winter 6.85, spring 6.84, summer 7.16, fall 6.94).
+`GET /api/v1/statistics/by-year`, `by-type`, `by-season`, `by-tag` and `by-studio` take `min_ratings` (0 to 100,000, default 50), and each response reports the value used. `by-studio` also keeps its own `min_anime` (the minimum scored anime per studio, default 10). On RDS, `by-type` for TV gives 5,490 scored anime of 8,580 (mean 6.876) at both `min_ratings=0` and 50, and 4,776 (mean 6.997) at 500: MAL gives a score only to anime with at least 100 ratings (the lowest `scored_by_mal` among scored anime is 101, and none has fewer than 100), so every value up to 100 returns exactly the same result and the default of 50 means every anime MAL scores; only a value above 100 excludes anime. `by-type` and `by-season` already took `year_from` and `year_to`, so a single year or any range works (for example TV by season in 2025: winter 6.85, spring 6.84, summer 7.16, fall 6.94).
+
+## 12. Consistency audit of the statistics (issues #51 to #53), 18 Nov 2026
+
+`analysis/audit_statistics.py` cross-checks the endpoints against each other and against direct SQL on the real catalogue (RDS, read-only). **All 14 checks pass:**
+- the anime totals of by-type (23,086), by-year (22,389 plus 697 with no year) and by-season (18,475 plus 4,611 with no season) all add up to the list's total;
+- the scored totals match SQL exactly (by-type 15,379, by-year 15,363) and the weighted mean of by-type equals SQL's average (6.5417 against 6.5416);
+- over 296 group rows across the five endpoints, `scored_count` never exceeds `anime_count`, means and medians stay within 1 to 10, and a mean is null exactly when `scored_count` is 0;
+- by-studio is sorted by mean and respects its minimum; `scored_count` shrinks as `min_ratings` rises (15,379, 15,379, 11,224 at 0, 50 and 500);
+- over 80 random anime, the per-anime statistics hold their invariants (list-status shares add to 1, vote percentages to 100, every percentile within 0 and 1 with its rank within the cohort, no hidden gem on a low-sample anime); over 60 random anime with episodes, the smoothed scores stay within the score range, best is not below worst, and a turning point exists exactly for `gets_good`;
+- the OpenAPI document builds (32 paths).
+
+**Findings, not failures.**
+- **MAL's score and the mean of its vote histogram differ.** Both are in the per-anime response (`core.mal_score` and `score_distribution.mean`, which the schema labels as computed from the histogram). Over all scored anime with a histogram the gap is small for popular anime and larger for less rated ones: median 0.024 and mean 0.042 with 10,000 or more ratings (4,920 anime), median 0.034 and mean 0.056 with 1,000 to 10,000 (4,640), median 0.159 and mean 0.234 with 100 to 999 (5,819); the histogram mean runs lower than MAL's score by 0.13 on average in that last group, and the largest single gap is 2.32. MAL's score is not a plain average of the votes, so the two should not be shown as the same number.
+- **The aggregates' default minimum of 50 ratings equals "every scored anime"**, because MAL does not score an anime below 100 ratings (see the `min_ratings` note above).
+- The votes in the histogram add up to `scored_by_mal` (median ratio 1.000, range 0.946 to 1.001 over 80 anime).
+
+**Not covered by the audit:** the SQL of the new indexes has not been measured on the real RDS tables (the migrations run on merge), there are no real-Postgres tests, and load behaviour is untested (#55).
