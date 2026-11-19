@@ -1,0 +1,145 @@
+# The backend on the Oracle VM: the API, the Celery worker and beat, Redis, and Caddy (HTTPS).
+# Postgres is not here: the database is RDS (DB_URL in .env.prod).
+#
+# Run it through deploy/deploy.sh (CI does), which also builds the image and checks it came up:
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+#
+# .env.prod is written on the server by CI from GitHub secrets and variables
+# (deploy/render-env.sh). Every value the stack needs is required: startup fails without it.
+name: anime-backend
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# The image holds the code and its virtualenv; the three Python services share it. The default
+# command in the Dockerfile also runs the migrations, so every service overrides `command`: the
+# schema is migrated by the `migrate` job in CI, never by a container starting.
+x-backend: &backend
+  image: anime-backend:${IMAGE_TAG:-local}
+  env_file: .env.prod
+  restart: unless-stopped
+  logging: *logging
+  depends_on:
+    redis:
+      condition: service_healthy
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: anime_redis_prod
+    restart: unless-stopped
+    logging: *logging
+    # noeviction: a full Redis refuses writes (the cache falls through to the database); it never
+    # drops a revoked token or a queued task. AOF keeps both across a restart. No published port.
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    <<: *backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: anime_backend_app
+    # --no-access-log: the access log holds the query string, which includes what people search for.
+    command:
+      - .venv/bin/uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --no-access-log
+    expose:
+      - "8000"
+    mem_limit: 1g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)"
+      interval: 15s
+      timeout: 6s
+      retries: 4
+      start_period: 30s
+
+  celery_worker:
+    <<: *backend
+    container_name: anime_backend_worker
+    command:
+      - .venv/bin/celery
+      - -A
+      - app.core.workers.celery_worker
+      - worker
+      - --loglevel=info
+    # Let a running task (an email) finish before the container is replaced.
+    stop_grace_period: 60s
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", ".venv/bin/celery -A app.core.workers.celery_worker inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+
+  # Exactly one beat: two would schedule every task twice. It stays until the token cleanup moves
+  # to Airflow (ADR 0001).
+  celery_beat:
+    <<: *backend
+    container_name: anime_backend_beat
+    command:
+      - .venv/bin/celery
+      - -A
+      - app.core.workers.celery_worker
+      - beat
+      - --loglevel=info
+      - --schedule
+      - /tmp/celerybeat-schedule
+    mem_limit: 256m
+
+  # HTTPS in front of the API. Gets and renews the certificate for API_HOSTNAME by itself, which
+  # needs ports 80 and 443 reachable from the internet. The app is not published anywhere else.
+  caddy:
+    image: caddy:2-alpine
+    container_name: anime_backend_caddy
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_HOSTNAME: ${API_HOSTNAME:?set API_HOSTNAME}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # the certificate: kept across redeploys, so none is re-requested
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    mem_limit: 128m
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:

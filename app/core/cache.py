@@ -18,6 +18,7 @@ from enum import Enum
 from typing import TypeVar
 
 import structlog
+from prometheus_client import Counter
 from pydantic import BaseModel, ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -32,6 +33,17 @@ KEY_PREFIX = "cache:v1"
 FAILURE_LOG_INTERVAL_SECONDS = 30
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+# What the cache did, by endpoint family (the name in the key: anime_list, aggregate_by_tag, ...)
+# and outcome: hit, miss, skipped (not stored: too large or not popular enough) or error (Redis
+# failed and the request went to the database). A handful of families, so a small label set.
+CACHE_REQUESTS = Counter(
+    "cache_requests_total", "Response cache lookups by family and result", ["family", "result"]
+)
+
+
+def _family(key: str) -> str:
+    return key.split(":")[2] if key.count(":") >= 2 else "unknown"
 
 
 def _key_value(part_name: str, value) -> str:
@@ -78,24 +90,31 @@ class ResponseCache:
             )
 
     async def _read(self, key: str, model: type[ModelT]) -> ModelT | None:
+        family = _family(key)
         try:
             raw = await self.redis.get(key)
         except RedisError as error:
             self._failed("get", key, error)
+            CACHE_REQUESTS.labels(family, "error").inc()
             return None
         if raw is None:
+            CACHE_REQUESTS.labels(family, "miss").inc()
             return None
         try:
-            return model.model_validate_json(raw)
+            response = model.model_validate_json(raw)
         except (ValidationError, ValueError) as error:
             # A value from an older response shape: treat it as a miss, it expires by its TTL.
             self._failed("parse", key, error)
+            CACHE_REQUESTS.labels(family, "error").inc()
             return None
+        CACHE_REQUESTS.labels(family, "hit").inc()
+        return response
 
     async def _write(self, key: str, response: BaseModel) -> None:
         payload = response.model_dump_json()
         if len(payload.encode()) > self.max_value_bytes:
             logger.info("cache_skipped_too_large", key=key, bytes=len(payload.encode()))
+            CACHE_REQUESTS.labels(_family(key), "skipped").inc()
             return
         try:
             await self.redis.set(key, payload, ex=self.ttl_seconds)
@@ -118,6 +137,8 @@ class ResponseCache:
         response = await loader()
         if store_if is None or store_if(response):
             await self._write(key, response)
+        else:
+            CACHE_REQUESTS.labels(_family(key), "skipped").inc()
         return response
 
 

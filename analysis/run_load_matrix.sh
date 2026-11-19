@@ -31,7 +31,6 @@ start_server() {  # $1 = true|false (cache enabled)
   fi
   APP_ENV=rds CACHE_ENABLED=$1 $PY -m uvicorn app.main:app --port $PORT --log-level warning \
     >"$OUT/server_cache_$1.log" 2>&1 &
-  SERVER_PID=$!
   for _ in $(seq 1 60); do
     curl -sf $HOST/api/v1/health >/dev/null 2>&1 && return 0
     sleep 1

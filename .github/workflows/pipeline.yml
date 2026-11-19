@@ -227,6 +227,7 @@ jobs:
     outputs:
       airflow: ${{ steps.diff.outputs.airflow }}
       alembic: ${{ steps.diff.outputs.alembic }}
+      backend: ${{ steps.diff.outputs.backend }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -244,6 +245,7 @@ jobs:
              || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             echo "airflow=true" >> "$GITHUB_OUTPUT"
             echo "alembic=true" >> "$GITHUB_OUTPUT"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
             echo "No previous commit to compare with: migrating and deploying"
             exit 0
           fi
@@ -261,6 +263,13 @@ jobs:
           else
             echo "alembic=false" >> "$GITHUB_OUTPUT"
             echo "No Alembic file changed: not migrating"
+          fi
+          # The backend stack is built from these (see deploy-backend below)
+          if echo "$changed" | grep -Eq '^(app/|Dockerfile$|pyproject\.toml$|uv\.lock$|docker-compose\.prod\.yml$|deploy/)'; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing the backend is built from changed: not redeploying it"
           fi
 
   deploy:
@@ -315,3 +324,116 @@ jobs:
       - name: Remove the SSH key
         if: always()
         run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+  # --- Backend: API, Celery, Redis and Caddy (HTTPS) on the Oracle VM (issue #62) ---------------
+  # Runs on a push to main when something the backend is built from changed (app/, the Dockerfile,
+  # the dependencies, docker-compose.prod.yml or deploy/), after the tests and the image
+  # build passed. It does NOT migrate: the migrate job does, when an Alembic file changed, and this
+  # job does not run if that migration failed (a skipped migration is fine).
+  # The production secrets and variables live in the repository's GitHub secrets and variables, never in the
+  # repository: see docs/deploy.md for the list. CI writes them to .env.prod on the server.
+  # A failed deploy puts the previous image back (deploy/deploy.sh); roll back by hand with
+  #   bash deploy/deploy.sh <tag>      (the tags are the commit ids of the images on the server)
+  deploy-backend:
+    needs: [startup-and-test, dockerfile-build, migrate, changes]
+    if: >-
+      !cancelled()
+      && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.startup-and-test.result == 'success'
+      && needs.dockerfile-build.result == 'success'
+      && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
+      && needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-backend-production
+      cancel-in-progress: false # never cut a running deploy short; the next one waits
+    env:
+      HOST: ${{ secrets.ORACLE_HOST }}
+      SSH_USER: ${{ secrets.ORACLE_USER }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Write the production env file on the server
+        shell: bash
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          API_HOSTNAME: ${{ vars.API_HOSTNAME || secrets.API_HOSTNAME }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL || secrets.FRONTEND_URL }}
+          CORS_EXTRA_ORIGINS: ${{ vars.CORS_EXTRA_ORIGINS || secrets.CORS_EXTRA_ORIGINS }}
+        run: |
+          # Rendered to a file first, so a failed or empty render can never replace the server's
+          # file with an empty one. The values reach the server on stdin, never on a command line.
+          bash deploy/render-env.sh > "$RUNNER_TEMP/env.prod"
+          test -s "$RUNNER_TEMP/env.prod"
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              "$SSH_USER@$HOST" \
+              'umask 077; cd ~/Anime_App_Backend && cat > .env.prod.new && mv .env.prod.new .env.prod' \
+              < "$RUNNER_TEMP/env.prod"
+          rm -f "$RUNNER_TEMP/env.prod"
+
+      - name: Pull main and deploy the backend on the Oracle box
+        run: |
+          # deploy.sh builds the image on the VM (it is Arm), recreates the containers, waits until
+          # they are healthy, and puts the previous image back if they are not.
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+              "$SSH_USER@$HOST" \
+              'set -euo pipefail
+               cd ~/Anime_App_Backend
+               git fetch origin main
+               git checkout main
+               git pull --ff-only origin main
+               bash deploy/deploy.sh'
+
+      - name: Check the public API
+        env:
+          API_HOSTNAME: ${{ vars.API_HOSTNAME || secrets.API_HOSTNAME }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL || secrets.FRONTEND_URL }}
+          CORS_EXTRA_ORIGINS: ${{ vars.CORS_EXTRA_ORIGINS || secrets.CORS_EXTRA_ORIGINS }}
+        run: |
+          base="https://$API_HOSTNAME"
+          ok=0
+          for _ in $(seq 1 30); do # the first deploy also waits for the certificate
+            if curl -fsS --max-time 10 "$base/api/v1/health" > /dev/null; then ok=1; break; fi
+            sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::$base/api/v1/health did not answer"; exit 1; }
+          echo "health: ok"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/metrics")
+          [ "$code" = 404 ] || { echo "::error::/metrics answers from outside (HTTP $code)"; exit 1; }
+          echo "/metrics is not public: ok"
+
+          origin=$(curl -s -o /dev/null -D - --max-time 10 -X OPTIONS "$base/api/v1/anime" \
+            -H "Origin: ${FRONTEND_URL%/}" -H "Access-Control-Request-Method: GET" \
+            | tr -d '\r' | grep -i '^access-control-allow-origin:' | cut -d' ' -f2-)
+          [ "$origin" = "${FRONTEND_URL%/}" ] || { echo "::error::CORS does not allow the frontend origin"; exit 1; }
+          other=$(curl -s -o /dev/null -D - --max-time 10 -X OPTIONS "$base/api/v1/anime" \
+            -H "Origin: https://not-the-frontend.invalid" -H "Access-Control-Request-Method: GET" \
+            | tr -d '\r' | grep -ic '^access-control-allow-origin:' || true)
+          [ "$other" = 0 ] || { echo "::error::CORS allows another origin"; exit 1; }
+          echo "CORS: ok"
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts "$RUNNER_TEMP/env.prod"
