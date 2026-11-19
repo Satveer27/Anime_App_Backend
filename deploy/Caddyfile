@@ -1,0 +1,20 @@
+# HTTPS for the API. API_HOSTNAME (for example animeplanet-api.duckdns.org) must point at the VM's
+# public IP, and ports 80 and 443 must be open: Caddy gets the certificate from Let's Encrypt on
+# the first request, renews it by itself, and redirects http to https.
+{$API_HOSTNAME} {
+	encode zstd gzip
+
+	# /metrics is not for the public. Never answer it on the public name.
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+
+	reverse_proxy app:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# No access log on purpose: the URL holds what people search for.
+}
