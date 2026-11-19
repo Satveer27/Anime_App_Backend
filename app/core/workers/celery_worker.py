@@ -6,6 +6,9 @@ from celery.signals import worker_process_init
 
 from app.config import settings
 from app.core.database.database import engine
+from app.core.logging import configure_logging
+
+configure_logging(settings.log_json)
 
 celery_app = Celery(
     "worker",

@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator, metrics
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -11,7 +13,9 @@ from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
+from app.core.cors import allowed_origins
 from app.core.database.database import engine
+from app.core.logging import configure_logging
 from app.core.redis.redis_client import redis_server
 from app.exceptions import (
     AppError,
@@ -23,6 +27,7 @@ from app.exceptions import (
 )
 from app.router import main_router
 
+configure_logging(settings.log_json)
 logger = structlog.get_logger()
 
 
@@ -102,6 +107,32 @@ app = FastAPI(
 
 # Routes
 app.include_router(main_router, prefix="/api/v1")
+
+# Metrics at /metrics (Prometheus text format): request counts and latency by method, route template (never
+# the raw URL, so /anime/{mal_id}/statistics is one series, not one per anime) and status class.
+# The health checks are left out (Docker calls them every few seconds). /metrics is not public:
+# Caddy answers 404 for it on the public name (deploy/Caddyfile).
+# Nothing scrapes it yet; on the VM: docker compose exec app python -c with urllib, or add a scraper.
+_latency_buckets = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
+Instrumentator(
+    should_group_status_codes=True,
+    excluded_handlers=[r"/metrics", r"/api/v1/health.*"],
+).add(
+    metrics.requests(),
+    metrics.latency(buckets=_latency_buckets),
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+# CORS: only the frontend's origin (FRONTEND_URL, plus CORS_EXTRA_ORIGINS) may call the API from a
+# browser, with credentials (the refresh token is an HttpOnly cookie). Added last, so it is the
+# outermost middleware and answers the preflight request itself.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins(settings.frontend_url, settings.cors_extra_origins),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+    max_age=600,
+)
 
 
 # Exception

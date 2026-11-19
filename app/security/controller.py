@@ -32,7 +32,7 @@ async def refresh_access_token(
             value=result.refresh_token,
             httponly=True,
             secure=settings.http_secure,
-            samesite="lax",
+            samesite=settings.cookie_samesite,
             max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
             path="/api/v1/auth",
         )
@@ -58,7 +58,7 @@ async def login(
         value=result.refresh_token,
         httponly=True,
         secure=settings.http_secure,
-        samesite="lax",
+        samesite=settings.cookie_samesite,
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
         path="/api/v1/auth",
     )
@@ -81,7 +81,13 @@ async def logout(
 
     ended_session = await service.logout_service(refresh_token, access_token)
 
-    response.delete_cookie("refresh_token", path="/api/v1/auth")
+    response.delete_cookie(
+        "refresh_token",
+        path="/api/v1/auth",
+        secure=settings.http_secure,
+        httponly=True,
+        samesite=settings.cookie_samesite,
+    )
 
     if not ended_session:
         return SuccessMessage(success_message="Already logged out of account")
@@ -103,7 +109,13 @@ async def logout_all(
 
     ended_sessions = await service.logout_all_accounts(refresh_token)
 
-    response.delete_cookie("refresh_token", path="/api/v1/auth")
+    response.delete_cookie(
+        "refresh_token",
+        path="/api/v1/auth",
+        secure=settings.http_secure,
+        httponly=True,
+        samesite=settings.cookie_samesite,
+    )
 
     if not ended_sessions:
         return SuccessMessage(success_message="Already logged out of all accounts")

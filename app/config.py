@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +19,14 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int
     jwt_algorithm: str
     http_secure: bool = False
+    # SameSite of the refresh-token cookie. `lax` suits a frontend on the same site as the API (local
+    # development). A frontend on another site (localhost against the deployed API, or Vercel)
+    # needs `none`, which browsers only accept together with Secure (HTTP_SECURE=true).
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    # More origins allowed to call the API from a browser, besides FRONTEND_URL (comma-separated).
+    cors_extra_origins: str = ""
+    # JSON log lines (production) instead of the readable development output.
+    log_json: bool = False
     tenrai_rate_limiter_requests_per_minute: float = 100
     mal_data_base_url: str = "https://api.tenrai.org/v1"
     refresh_grace_seconds: int = 10
