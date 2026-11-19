@@ -27,7 +27,7 @@ uv run --env-file .env.local alembic revision --autogenerate -m "msg"   # new mi
 uv run --env-file .env.local alembic check                              # CI fails if models and migrations drift
 ```
 
-CI (`.github/workflows/pipeline.yml`) runs `ruff check` and `ruff format --check`, migrations, `alembic check`, pytest, then builds the compose stack and polls `/health`.
+CI (`.github/workflows/pipeline.yml`) runs `ruff check` and `ruff format --check`, migrations, `alembic check`, pytest, then builds the compose stack and polls `/health`. On a push to `main` it also deploys: `migrate` (Alembic changes), `deploy` (Airflow, `airflow/` changes) and `deploy-backend` (API, Celery, Redis and Caddy on the Oracle VM, when `app/`, the Dockerfile, dependencies, `docker-compose.prod.yml` or `deploy/` change). The backend's production secrets come from GitHub secrets and variables, not the repo. Setup, rollback and alerts: `docs/deploy.md`; decision: ADR 0022.
 
 ## Configuration
 
