@@ -88,7 +88,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AnimePlanet FastAPI Application",
-    description="Authentication, user management, and admin API for the AnimePlanet backend.",
+    description=(
+        "Anime analytics API built on MyAnimeList data: search and filter the catalogue, "
+        "per-anime statistics, platform-wide rankings, and user accounts."
+    ),
     version="1.0.0",
     lifespan=lifespan,
     openapi_tags=[

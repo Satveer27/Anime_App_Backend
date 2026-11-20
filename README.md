@@ -2,6 +2,8 @@
 
 An anime analytics API built on MyAnimeList data (about 23,000 anime). It serves search, per-anime statistics and platform-wide rankings, and the data is kept fresh by a scheduled pipeline.
 
+**Frontend:** https://anime-app-frontend-dun.vercel.app
+
 **Live API docs:** https://animeplanet-api.duckdns.org/docs
 
 ## What it does
