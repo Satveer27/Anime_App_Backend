@@ -61,6 +61,11 @@ flowchart LR
 - **Data in:** Airflow pulls MAL data from the Tenrai API, keeps the raw JSON in S3, then cleans it into Postgres on a weekly and monthly schedule.
 - **Email:** the API queues a task in Redis, and the Celery worker sends it through Resend.
 
+## Dashboard
+A Power BI dashboard over the catalogue: average score by year, top studios, drop-rate leaders and hidden gems. The data is exported from the production database with [`analysis/export_powerbi_csv.py`](analysis/export_powerbi_csv.py), which uses the same queries as the API, so the numbers match.
+
+![Power BI dashboard of the AnimePlanet catalogue](docs/images/powerbi-dashboard.png)
+
 ## Run it locally
 ```bash
 uv sync --group dev
