@@ -17,6 +17,50 @@ An anime analytics API built on MyAnimeList data (about 23,000 anime). It serves
 ## Stack
 FastAPI, async SQLAlchemy with asyncpg, Postgres (AWS RDS), Redis, Celery, Airflow, Alembic, structlog, uv. Deployed with Docker Compose on an Oracle Arm VM, with Caddy for HTTPS.
 
+## Architecture
+```mermaid
+flowchart LR
+    user(["Visitor's browser"])
+
+    subgraph vercel["Vercel"]
+        fe["Frontend<br/>anime-app-frontend-dun.vercel.app"]
+    end
+
+    subgraph vm["Oracle Arm VM (Docker Compose)"]
+        caddy["Caddy<br/>HTTPS on 443, free certificate"]
+        api["FastAPI app<br/>port 8000, internal only"]
+        redis[("Redis<br/>cache, revoked tokens, task queue")]
+        worker["Celery worker + beat<br/>emails, token cleanup"]
+        airflow["Airflow<br/>weekly and monthly refresh"]
+    end
+
+    subgraph aws["AWS"]
+        rds[("Postgres on RDS<br/>catalogue, users, sessions")]
+        s3[("S3<br/>raw MAL payloads")]
+    end
+
+    tenrai[["Tenrai API<br/>MyAnimeList data"]]
+    resend[["Resend<br/>email"]]
+
+    user -->|"opens the site"| fe
+    fe -->|"API calls from the browser<br/>JSON over HTTPS, CORS"| caddy
+    caddy --> api
+    api -->|"1. cache hit?"| redis
+    api -->|"2. on a miss: SQL"| rds
+    api -->|"queue an email task"| redis
+    redis --> worker
+    worker --> resend
+
+    tenrai -->|"MAL data"| airflow
+    airflow -->|"raw JSON"| s3
+    airflow -->|"clean and load"| rds
+```
+
+- **A request:** the browser calls the API over HTTPS. Caddy passes it to FastAPI, which checks Redis first. On a miss it reads Postgres and caches the answer for an hour.
+- **Login:** the access token (30 minutes) comes back in the JSON. The refresh token is an HttpOnly cookie; sessions are stored in Postgres and revoked tokens in Redis.
+- **Data in:** Airflow pulls MAL data from the Tenrai API, keeps the raw JSON in S3, then cleans it into Postgres on a weekly and monthly schedule.
+- **Email:** the API queues a task in Redis, and the Celery worker sends it through Resend.
+
 ## Run it locally
 ```bash
 uv sync --group dev
@@ -33,6 +77,15 @@ uv run ruff check .
 
 ## How it is deployed
 GitHub Actions runs the tests and the image build on every push. When the backend changes on `main`, it also deploys to the Oracle VM over SSH, with a rollback if the new containers are not healthy. Setup and day-to-day steps are in [`docs/deploy.md`](docs/deploy.md).
+
+```mermaid
+flowchart LR
+    push["Merge to main"] --> ci["GitHub Actions<br/>ruff, pytest, image build"]
+    ci -->|"SSH"| vm["Oracle VM"]
+    vm --> mig["Migrate RDS<br/>only if Alembic files changed"]
+    vm --> be["Deploy the backend<br/>only if backend files changed<br/>build, replace containers, roll back if unhealthy"]
+    vm --> af["Deploy Airflow<br/>only if airflow/ changed"]
+```
 
 ## More
 - [`CONTEXT.md`](CONTEXT.md): the product vocabulary and vision (an AI "mood search" is planned, not built yet).
